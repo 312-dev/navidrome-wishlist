@@ -760,6 +760,33 @@ def _deezer_preview(svc, artist: str, title: str) -> str | None:
     return None
 
 
+@bp.post("/sync")
+def sync():
+    """Sweep every shop's purchases and claim what is recognised.
+
+    One job, not one per shop: the sweep reads them in parallel itself, so a
+    reader watching this has a single thing to watch. It queues an ordinary
+    claim for every purchase that clears the matcher's automatic gate, which
+    means nothing reaches the library by a route the single-track flow does not
+    already use.
+
+    Refuses to start a second while one is running. Two sweeps racing would
+    both read the same unfiled purchases and queue the same claims twice, and
+    the second would be work nobody asked for.
+    """
+    svc = _svc()
+    running = [j for j in svc.jobs.recent()
+               if j.get("kind") == "sync" and j.get("state") not in ("finished", "failed", "interrupted")]
+    if running:
+        return jsonify({"error": "A sync is already running.", "job_id": running[0]["id"]}), 409
+
+    if not (svc.stores or {}):
+        return jsonify({"error": "No shops are configured."}), 400
+
+    job_id = svc.jobs.enqueue("sync")
+    return jsonify({"job_id": job_id})
+
+
 @bp.get("/jobs")
 def jobs():
     return jsonify(list(_svc().jobs.recent()))

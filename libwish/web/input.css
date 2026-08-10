@@ -318,6 +318,48 @@
     padding: 28px 0 16px;
   }
 
+  /* Pushed to the far edge, opposite the wordmark: it acts on everything on
+     the page rather than on any one row, and sitting beside the mark would
+     read as part of it. */
+  .masthead__sync {
+    margin-left: auto;
+    align-self: center;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 14px;
+    font: inherit;
+    font-weight: 500;
+    color: var(--ink);
+    background: transparent;
+    border: 1px solid var(--rule-firm);
+    border-radius: var(--radius);
+    cursor: pointer;
+  }
+
+  .masthead__sync:hover:not(:disabled) { background: var(--sleeve); }
+  .masthead__sync:disabled { opacity: 0.55; cursor: default; }
+
+  /* Turns only while the sweep is actually running, so the motion means
+     "working" and not "there is a button here". */
+  .masthead__sync.is-busy .icon { animation: masthead-spin 1.1s linear infinite; }
+
+  @keyframes masthead-spin { to { transform: rotate(360deg); } }
+
+  @media (prefers-reduced-motion: reduce) {
+    .masthead__sync.is-busy .icon { animation: none; }
+  }
+
+  .masthead__said {
+    flex-basis: 100%;
+    margin: 6px 0 0;
+    text-align: right;
+    color: var(--ink-soft);
+    font-size: var(--t-small);
+  }
+
+  .masthead__said:empty { display: none; }
+
   /* A rule around the wordmark, not a logo. The shape rhymes with the plate,
      which is the object the rest of the interface teaches. */
   .masthead__mark {

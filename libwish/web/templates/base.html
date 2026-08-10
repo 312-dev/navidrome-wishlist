@@ -61,6 +61,15 @@
       nothing the eye does not already have. -#}
   <div class="masthead">
     <h1 class="masthead__mark">Library Wishlist</h1>
+    {#- Reads every shop's purchases at once and files what it recognises, so
+        buying a handful in one go does not mean marking them off one at a
+        time. Disabled while one is running: two sweeps would read the same
+        unfiled purchases and queue the same claims twice. -#}
+    <button type="button" class="masthead__sync" id="sync-purchases"
+            aria-describedby="sync-said">
+      {{ ic.icon('refresh', 15) }}<span>Sync purchases</span>
+    </button>
+    <p class="masthead__said" id="sync-said" role="status" aria-live="polite"></p>
   </div>
 </header>
 

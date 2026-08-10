@@ -305,7 +305,12 @@ class ClaimPipeline:
                 " ORDER BY decided_at DESC, id DESC LIMIT 1", (track_id,)).fetchone()
         finally:
             conn.close()
-        return bool(row) and row["outcome"] == "user_confirmed"
+        # `swept` is the same licence arrived at differently: a sweep matched
+        # this track against a purchase in the confirm band without anyone
+        # watching. Kept as its own outcome rather than written as a user
+        # confirmation, so the audit never claims a person looked at something
+        # they did not. Spent once, exactly as a confirmation is.
+        return bool(row) and row["outcome"] in ("user_confirmed", "swept")
 
     def _user_picked_item(self, track_id: int) -> str | None:
         """The item_key of a hand-picked purchase, or None.

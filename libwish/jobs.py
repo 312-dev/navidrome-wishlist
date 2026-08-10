@@ -36,6 +36,14 @@ DONE = ("finished", "failed", "interrupted")
 # phase here changes what the user is told.
 CLAIM_PHASES = ("session", "enumerate", "match", "download", "verify")
 
+# A sweep of every shop's purchases. Same shape, different work: it reads each
+# shop once and hands what it recognises to the claim queue.
+SYNC_PHASES = ("session", "enumerate", "match", "queue")
+
+# Kept here rather than beside each pipeline so the queue can answer "how many
+# steps does this kind have" without importing the code that runs it.
+PHASES = {"claim": CLAIM_PHASES, "sync": SYNC_PHASES}
+
 
 @dataclass(frozen=True)
 class Job:
@@ -163,8 +171,9 @@ class JobQueue:
 
     def _progress_fn(self, job: Job) -> ProgressFn:
         def progress(phase: str, **data: Any) -> None:
-            if job.kind == "claim" and phase not in CLAIM_PHASES:
-                raise ValueError(f"unknown claim phase {phase!r}; expected one of {CLAIM_PHASES}")
+            known = PHASES.get(job.kind)
+            if known is not None and phase not in known:
+                raise ValueError(f"unknown {job.kind} phase {phase!r}; expected one of {known}")
             conn = self._db()
             try:
                 conn.execute(
@@ -173,14 +182,15 @@ class JobQueue:
                 )
             finally:
                 conn.close()
-            step = CLAIM_PHASES.index(phase) + 1 if job.kind == "claim" else None
+            known = PHASES.get(job.kind)
+            step = known.index(phase) + 1 if known else None
             # Built as one dict rather than splatted, because a handler passing
             # a key this already sets would otherwise be a TypeError raised from
             # inside the queue, killing a job that was working. The queue's own
             # facts about the job win; a handler cannot restate them wrongly.
             payload = {
                 "job_id": job.id, "kind": job.kind, "phase": phase,
-                "step": step, "of": len(CLAIM_PHASES) if step else None,
+                "step": step, "of": len(known) if step else None,
                 "track_id": job.track_id,
             }
             for key, value in data.items():

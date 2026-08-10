@@ -303,7 +303,7 @@ def backfill_identity(svc: Any) -> int:
 
 def wire(svc: Any, context_for: Callable[[str, str], Any]) -> tuple[Scheduler, dict]:
     """Build the providers and attach everything to the running application."""
-    from . import claim, stores
+    from . import claim, stores, sync
 
     backfill_identity(svc)
 
@@ -316,6 +316,7 @@ def wire(svc: Any, context_for: Callable[[str, str], Any]) -> tuple[Scheduler, d
                                         configured_provider_ids("source"))
     store_providers = stores.build(None, lambda sid: context_for("store", sid))
     claim.register(svc, store_providers)
+    sync.register(svc, store_providers)
     from . import enrich
     svc.jobs.register("enrich", enrich.make_handler(svc))
 

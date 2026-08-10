@@ -830,6 +830,9 @@
     on('track.source_added', function (d) { refreshRow(d.id); });
     on('job.started', function (d) { if (d.track_id) refreshRow(d.track_id); });
     on('job.progress', onJobProgress);
+    /* The sweep has no track_id, so the row-oriented handlers above ignore it
+       and it needs its own listener rather than a branch inside theirs. */
+    on('job.progress', onSyncProgress);
     /* A claim that lands writes the new status straight to the row and
        publishes only the job event, so this is the moment a track changes
        which tab it belongs to. The row itself deliberately stays where it is,
@@ -839,6 +842,11 @@
       countsChanged();
     });
     on('job.failed', function (d) { if (d.track_id) refreshRow(d.track_id); });
+    /* A sweep that dies mid-run would otherwise leave the button spinning
+       forever, which reads as "still working" rather than "it stopped". */
+    on('job.failed', function (d) {
+      if (d.kind === 'sync') syncBusy(false, d.error || 'The sync stopped.');
+    });
     on('credential.updated', onCredential);
     on('provider.state', onCredential);
     on('scan.requested', function (d) {
@@ -1068,6 +1076,67 @@
    * start
    * ------------------------------------------------------------------ */
 
+  /* ------------------------------------------------------------------ *
+   * sync purchases
+   *
+   * One button for "I bought several things, sort them out". It starts a
+   * single sweep job; the queued claims then report themselves through the
+   * ordinary job stream like any other claim, so nothing here has to follow
+   * them. What it does own is the button's own state, because a sweep that
+   * looks idle while it is running invites a second press.
+   * ------------------------------------------------------------------ */
+
+  function syncBusy(on, said) {
+    var button = $('#sync-purchases');
+    if (!button) return;
+    button.disabled = !!on;
+    button.classList.toggle('is-busy', !!on);
+    if (said !== undefined) {
+      var out = $('#sync-said');
+      if (out) out.textContent = said;
+    }
+  }
+
+  function startSync() {
+    syncBusy(true, 'Reading your purchases...');
+    fetch('/api/sync', { method: 'POST', headers: { 'X-Requested-With': 'libwish' } })
+      .then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
+      .then(function (res) {
+        if (!res.ok) {
+          /* 409 means one is already running, which is not an error worth a
+             red banner: the answer is to wait, and the stream will say when. */
+          syncBusy(res.body && res.body.job_id ? true : false, res.body.error || 'Could not start.');
+          return;
+        }
+        say('Sync started.');
+      })
+      .catch(function () { syncBusy(false, 'Could not reach the server.'); });
+  }
+
+  /* Reads the sweep's own phases off the job stream. The counts it reports at
+     the end are the only place a reader learns that nothing matched, which is
+     a different answer from nothing having been bought. */
+  function onSyncProgress(data) {
+    if (data.kind !== 'sync') return;
+    if (data.phase === 'enumerate') {
+      syncBusy(true, 'Read ' + (data.purchases || 0) + ' purchases.');
+    } else if (data.phase === 'match') {
+      syncBusy(true, 'Matching ' + (data.purchases || 0) + ' purchases...');
+    } else if (data.phase === 'queue') {
+      var queued = data.queued || 0;
+      var near = data.near_misses || 0;
+      var parts = [];
+      parts.push(queued ? 'Filing ' + queued + (queued === 1 ? ' purchase.' : ' purchases.')
+                        : 'Nothing new to file.');
+      if (near) parts.push(near + (near === 1 ? ' was too close to call.' : ' were too close to call.'));
+      (data.shops_skipped || []).forEach(function (s) {
+        parts.push(s.shop + ' was skipped: ' + s.why + '.');
+      });
+      syncBusy(false, parts.join(' '));
+      say(parts.join(' '));
+    }
+  }
+
   function start() {
     rack = $('#rack');
     announcer = $('#announcer');
@@ -1077,6 +1146,9 @@
 
     watchCovers();
     paintMore();
+
+    var syncBtn = $('#sync-purchases');
+    if (syncBtn) syncBtn.addEventListener('click', startSync);
 
     var island = $('#claim-stages');
     if (island) {
