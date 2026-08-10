@@ -5,7 +5,9 @@
 
 {% block content %}
 {% if not tracks %}
-  <div class="empty">
+  {# See owned.html: these carry what a rack would have had, so the first
+     row to arrive live can take this block's place. #}
+  <div class="empty" data-view="ignored">
     <p class="empty__head">Ignored</p>
     <p class="empty__body">Nothing ignored. Tracks you dismiss from the want list wait here, and
       restoring one puts it straight back.</p>

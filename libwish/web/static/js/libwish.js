@@ -217,6 +217,40 @@
     return false;
   }
 
+  /* A list with nothing in it renders an empty state instead of a rack, so
+     the first row to arrive live has nowhere to go. That is not an edge case
+     on the Owned tab: it is the first purchase anyone ever files, landing on
+     a page that still says nothing has been claimed yet.
+
+     The empty block carries the view and grouping the rack would have had, so
+     it can be exchanged for one rather than having those strings written a
+     second time here. Returns null where there is no rack and nothing
+     standing in for one, which is the first-run page. */
+  /* Which list this page is, whether or not it has a rack yet. Read-only on
+     purpose: deciding that an event does not belong here must not cost the
+     empty state its message. */
+  function currentView() {
+    var el = document.getElementById('rack') || document.querySelector('.empty[data-view]');
+    return (el && el.dataset.view) || 'wanted';
+  }
+
+  function ensureRack() {
+    if (rack && document.body.contains(rack)) return rack;
+    rack = document.getElementById('rack');
+    if (rack) return rack;
+    var empty = document.querySelector('.empty[data-view]');
+    if (!empty) return null;
+    var list = document.createElement('ul');
+    list.className = 'rack';
+    list.id = 'rack';
+    list.setAttribute('role', 'list');
+    list.dataset.view = empty.dataset.view;
+    if (empty.dataset.group) list.dataset.group = empty.dataset.group;
+    empty.parentNode.replaceChild(list, empty);
+    rack = list;
+    return rack;
+  }
+
   function groupHeadFor(key, label) {
     var head = rack.querySelector('.group-head[data-group="' + CSS.escape(key) + '"]');
     if (head) return head;
@@ -236,7 +270,12 @@
     if (el) el.textContent = String((parseInt(el.textContent, 10) || 0) + delta);
   }
 
-  function insertRows(ids) {
+  /* `announce` is what the live region is told, as a function of how many rows
+     actually landed. It is a parameter because the same insertion serves a new
+     love arriving on Wanted and a purchase landing on Owned, and calling the
+     second one a new love would be a plain lie to the only reader who cannot
+     see the screen. */
+  function insertRows(ids, announce) {
     if (!rack || !ids.length) return Promise.resolve();
     var view = rack.dataset.view || 'wanted';
     var group = rack.dataset.group || 'date';
@@ -269,8 +308,10 @@
         more.dataset.offset = String(num(more.dataset.offset, 0) + rows.length);
         paintMore();
       }
-      say(rows.length === 1 ? 'One new love added to the list'
-                            : rows.length + ' new loves added to the list');
+      if (!rows.length) return;
+      say(announce ? announce(rows.length)
+                   : (rows.length === 1 ? 'One new love added to the list'
+                                        : rows.length + ' new loves added to the list'));
     });
   }
 
@@ -282,7 +323,7 @@
   }
 
   function onTrackAdded(data) {
-    if (!rack || rack.dataset.view !== 'wanted') return;
+    if (!ensureRack() || rack.dataset.view !== 'wanted') return;
     if (document.getElementById('row-' + data.id)) return;
     if (readerIsBusy()) {
       if (pending.indexOf(data.id) === -1) pending.push(data.id);
@@ -320,20 +361,50 @@
     window.setTimeout(drop, 140);
   }
 
-  /* Ignoring a track and restoring one both arrive as an update carrying the
-     new status rather than as a removal, so the view has to decide for itself
-     whether the row still belongs on screen. */
+  /* Ignoring a track, restoring one and filing a purchase all arrive as an
+     update carrying the new status rather than as a removal, so the view has
+     to decide for itself whether the row belongs on screen. */
   var BELONGS = {
     wanted: ['queued'],
     owned: ['purchased', 'owned'],
     ignored: ['ignored']
   };
 
+  /* What the reader is told when a status change brings a row onto the list
+     they are looking at. Named per view because "added" is not what happened:
+     the track was already on the list, it moved. */
+  var ARRIVED = {
+    wanted: function (n) {
+      return n === 1 ? 'One track is back on the list' : n + ' tracks are back on the list';
+    },
+    owned: function (n) {
+      return n === 1 ? 'One track landed in your library' : n + ' tracks landed in your library';
+    },
+    ignored: function (n) {
+      return n === 1 ? 'One track moved to ignored' : n + ' tracks moved to ignored';
+    }
+  };
+
   function onTrackUpdated(d) {
+    var view = currentView();
+    var allowed = BELONGS[view] || [];
+    var belongs = !!d.status && allowed.indexOf(d.status) !== -1;
     var row = document.getElementById('row-' + d.id);
-    if (!row) return;
-    var allowed = BELONGS[(rack && rack.dataset.view) || 'wanted'] || [];
-    if (d.status && allowed.indexOf(d.status) === -1) {
+
+    if (!row) {
+      /* The other half of the move. A claim landing takes a row off Wanted,
+         and until this existed it put nothing on Owned: the counts in the
+         tabs went up while the list under them stayed as it was, so the
+         purchase the reader had just watched complete was not there until
+         they reloaded the page.
+
+         An update carrying no status is not a move and must not conjure a
+         row: those are enrichments arriving for a track this view never
+         had. */
+      if (belongs && ensureRack()) insertRows([d.id], ARRIVED[view]);
+      return;
+    }
+    if (d.status && !belongs) {
       onTrackRemoved(d);
       return;
     }
@@ -833,10 +904,13 @@
     /* The sweep has no track_id, so the row-oriented handlers above ignore it
        and it needs its own listener rather than a branch inside theirs. */
     on('job.progress', onSyncProgress);
-    /* A claim that lands writes the new status straight to the row and
-       publishes only the job event, so this is the moment a track changes
-       which tab it belongs to. The row itself deliberately stays where it is,
-       showing its new plate; the counts are what move. */
+    /* The move between tabs is `track.updated`'s: it carries the new status,
+       so `onTrackUpdated` takes the row off the list it has left and puts it
+       on the one it has joined. This is the plate and the numbers catching up
+       afterwards, and it stays separate because a job can finish without any
+       status having changed. Both are safe to arrive in either order: an
+       insert skips a row already present, and a refresh of a row that is not
+       there does nothing. */
     on('job.finished', function (d) {
       if (d.track_id) refreshRow(d.track_id);
       countsChanged();
@@ -869,7 +943,12 @@
   });
 
   window.addEventListener('pageshow', function (e) {
-    if (e.persisted && window.EventSource) connect();
+    if (!e.persisted) return;
+    if (window.EventSource) connect();
+    /* The cached document still shows whatever it showed when it was put
+       away, and a sweep that finished in between sent its last phase to a
+       stream nobody was holding. */
+    restoreSync();
   });
 
   /* Names the consequence, not just the fault: "needs reconnecting" alone does
@@ -1113,28 +1192,73 @@
       .catch(function () { syncBusy(false, 'Could not reach the server.'); });
   }
 
+  /* One sentence per phase, from the phase name and its own payload. Written
+     once and called from two places: the live stream, and the restore below
+     that reads the same pair back off the job row after a navigation. Two
+     copies would drift, and the way they would drift is a reader seeing one
+     wording while watching and a different one after changing tabs. */
+  function syncSaid(phase, data) {
+    if (phase === 'session') return 'Reading your purchases...';
+    if (phase === 'enumerate') return 'Read ' + (data.purchases || 0) + ' purchases.';
+    if (phase === 'match') return 'Matching ' + (data.purchases || 0) + ' purchases...';
+    if (phase !== 'queue') return 'Reading your purchases...';
+
+    var queued = data.queued || 0;
+    var near = data.near_misses || 0;
+    var parts = [];
+    parts.push(queued ? 'Filing ' + queued + (queued === 1 ? ' purchase.' : ' purchases.')
+                      : 'Nothing new to file.');
+    if (near) parts.push(near + (near === 1 ? ' was too close to call.' : ' were too close to call.'));
+    (data.shops_skipped || []).forEach(function (s) {
+      parts.push(s.shop + ' was skipped: ' + s.why + '.');
+    });
+    return parts.join(' ');
+  }
+
   /* Reads the sweep's own phases off the job stream. The counts it reports at
      the end are the only place a reader learns that nothing matched, which is
      a different answer from nothing having been bought. */
   function onSyncProgress(data) {
     if (data.kind !== 'sync') return;
-    if (data.phase === 'enumerate') {
-      syncBusy(true, 'Read ' + (data.purchases || 0) + ' purchases.');
-    } else if (data.phase === 'match') {
-      syncBusy(true, 'Matching ' + (data.purchases || 0) + ' purchases...');
-    } else if (data.phase === 'queue') {
-      var queued = data.queued || 0;
-      var near = data.near_misses || 0;
-      var parts = [];
-      parts.push(queued ? 'Filing ' + queued + (queued === 1 ? ' purchase.' : ' purchases.')
-                        : 'Nothing new to file.');
-      if (near) parts.push(near + (near === 1 ? ' was too close to call.' : ' were too close to call.'));
-      (data.shops_skipped || []).forEach(function (s) {
-        parts.push(s.shop + ' was skipped: ' + s.why + '.');
-      });
-      syncBusy(false, parts.join(' '));
-      say(parts.join(' '));
-    }
+    if (data.phase !== 'queue' && data.phase !== 'enumerate' && data.phase !== 'match') return;
+    var said = syncSaid(data.phase, data);
+    syncBusy(data.phase !== 'queue', said);
+    if (data.phase === 'queue') say(said);
+  }
+
+  /* How long a finished sweep keeps explaining itself. The line under the
+     button answers "what happened to the thing I just pressed", and after a
+     while there is no longer a thing anyone just pressed: coming back to the
+     page tomorrow and reading "Filing 5 purchases." would describe yesterday
+     in the present tense. */
+  var SYNC_RECENT_S = 600;
+
+  /* Every tab here is a real link, so a sweep started on one page is watched
+     from a document that never saw it start. The button state and the line
+     under it are therefore taken from the job row rather than from anything
+     this page remembers, which also makes them survive a reload and come back
+     right in a second window. */
+  function restoreSync() {
+    if (!$('#sync-purchases')) return;
+    fetch('/api/sync', { headers: { 'X-Requested-With': 'libwish' }, credentials: 'same-origin' })
+      .then(function (res) { return res.ok ? res.json() : null; })
+      .then(function (job) {
+        if (!job || !job.state) return;
+        if (job.state === 'queued' || job.state === 'running') {
+          /* Still going, so the stream will carry it from here. */
+          syncBusy(true, syncSaid(job.phase, job.progress || {}));
+          return;
+        }
+        if (job.state === 'failed' || job.state === 'interrupted') {
+          syncBusy(false, job.error || 'The sync stopped.');
+          return;
+        }
+        var age = Math.floor(Date.now() / 1000) - (job.finished_at || 0);
+        if (job.finished_at && age <= SYNC_RECENT_S) {
+          syncBusy(false, syncSaid(job.phase, job.progress || {}));
+        }
+      })
+      .catch(function () { /* the button stays as the page rendered it */ });
   }
 
   function start() {
@@ -1149,6 +1273,7 @@
 
     var syncBtn = $('#sync-purchases');
     if (syncBtn) syncBtn.addEventListener('click', startSync);
+    restoreSync();
 
     var island = $('#claim-stages');
     if (island) {

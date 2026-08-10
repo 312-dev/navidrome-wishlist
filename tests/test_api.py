@@ -882,6 +882,94 @@ class TabCounts(Base):
                 self.assertEqual(counts[view], int(listed))
 
 
+class SyncSurvivesANavigation(Base):
+    """Where the sync button gets its state after the page is thrown away.
+
+    Every tab is an ordinary link, so a sweep started on one page is watched
+    from a document that never saw it start. Kept only in the browser, the
+    button came back enabled and its line blank while the sweep was still
+    running, which reads as "nothing is happening" and invites the second
+    press `POST /api/sync` exists to refuse.
+    """
+
+    def a_sync(self, state="running", phase=None, progress=None, error=None,
+               finished_at=None):
+        import time
+        conn = self.svc.db()
+        try:
+            cur = conn.execute(
+                "INSERT INTO jobs(kind, state, phase, progress, error, created_at,"
+                " finished_at) VALUES('sync',?,?,?,?,?,?)",
+                (state, phase, json.dumps(progress) if progress is not None else None,
+                 error, int(time.time()), finished_at))
+            return cur.lastrowid
+        finally:
+            conn.close()
+
+    def state(self):
+        response = self.client.get("/api/sync")
+        self.assertEqual(response.status_code, 200)
+        return response.get_json()
+
+    def test_no_sweep_has_ever_run(self):
+        # Distinct from one that ran and found nothing: there is no sentence to
+        # restore, so the page keeps the blank line it rendered with.
+        self.assertIsNone(self.state()["state"])
+
+    def test_a_running_sweep_reports_the_phase_it_reached(self):
+        self.a_sync(phase="enumerate", progress={"purchases": 8})
+        answer = self.state()
+        self.assertEqual(answer["state"], "running")
+        self.assertEqual(answer["phase"], "enumerate")
+        # The same pair the live stream sends, so one sentence serves both.
+        self.assertEqual(answer["progress"], {"purchases": 8})
+
+    def test_a_finished_sweep_still_carries_its_counts(self):
+        # The counts are the only place a reader learns that nothing matched,
+        # which is a different answer from nothing having been bought. Losing
+        # them to a tab change loses that distinction.
+        self.a_sync(state="finished", phase="queue", finished_at=1786400000,
+                    progress={"queued": 5, "near_misses": 1, "shops_skipped": []})
+        answer = self.state()
+        self.assertEqual(answer["state"], "finished")
+        self.assertEqual(answer["progress"]["queued"], 5)
+        self.assertEqual(answer["finished_at"], 1786400000)
+
+    def test_the_newest_sweep_is_the_one_answered_for(self):
+        self.a_sync(state="finished", phase="queue", progress={"queued": 1})
+        newest = self.a_sync(phase="session")
+        self.assertEqual(self.state()["id"], newest)
+
+    def test_another_kind_of_job_is_not_mistaken_for_a_sweep(self):
+        # Claims outnumber sweeps and a sweep queues them, so the newest job
+        # after a successful sweep is almost never the sweep.
+        track_id = self.a_track()
+        conn = self.svc.db()
+        try:
+            conn.execute("INSERT INTO jobs(kind, state, track_id, created_at)"
+                         " VALUES('claim','running',?,9999999999)", (track_id,))
+        finally:
+            conn.close()
+        self.assertIsNone(self.state()["state"])
+
+    def test_a_failed_sweep_says_why_rather_than_spinning(self):
+        self.a_sync(state="failed", phase="session", error="Qobuz is signed out.")
+        answer = self.state()
+        self.assertEqual(answer["state"], "failed")
+        self.assertEqual(answer["error"], "Qobuz is signed out.")
+
+    def test_unreadable_progress_is_an_empty_object_not_a_failure(self):
+        # The column holds whatever a handler last wrote. A crash mid-write
+        # should cost the sentence under the button, not the page.
+        self.a_sync(state="finished", phase="queue")
+        conn = self.svc.db()
+        try:
+            conn.execute("UPDATE jobs SET progress='{not json' WHERE kind='sync'")
+        finally:
+            conn.close()
+        self.assertEqual(self.state()["progress"], {})
+
+
 class Installable(Base):
     """What has to hold for the app to install and to survive a bad deploy.
 

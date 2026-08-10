@@ -5,7 +5,11 @@
 
 {% block content %}
 {% if total == 0 %}
-  <div class="empty">
+  {# Carries the rack's own view and grouping so that the first row to
+     arrive live can replace this with a real list. Without them the very
+     first purchase you ever file lands on a tab still saying nothing is
+     claimed yet, until the page is reloaded by hand. #}
+  <div class="empty" data-view="owned" data-group="date">
     <p class="empty__head">Owned</p>
     <p class="empty__body">Nothing claimed yet. Buy something, claim it here, and the file lands
       in your library with its quality stamped on it.</p>

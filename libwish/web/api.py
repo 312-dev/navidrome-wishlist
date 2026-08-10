@@ -787,6 +787,50 @@ def sync():
     return jsonify({"job_id": job_id})
 
 
+def _progress(raw: str | None) -> dict:
+    """A job's stored progress, as an object. Unreadable is empty, not fatal.
+
+    The column holds whatever a handler last reported, so a caller asking for
+    it after a crash mid-write should get a page with a blank line under the
+    button rather than a 500.
+    """
+    try:
+        value = json.loads(raw or "{}")
+    except ValueError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+@bp.get("/sync")
+def sync_state():
+    """The newest sweep, however it ended, so a page can pick it back up.
+
+    Every tab in this application is an ordinary link, so moving between them
+    is a fresh document with no memory of the sweep that was running when the
+    reader left. The button would come back enabled and the line under it
+    blank, which reads as "nothing is happening" at the exact moment something
+    is, and invites the second press `POST /sync` exists to refuse.
+
+    Answered from the job row rather than from anything the browser kept,
+    because the job row is what is true: a sweep that finished while the reader
+    was on another tab has to come back finished, not still spinning. `phase`
+    and `progress` are the same pair the live stream sends, so the interface
+    builds its sentence one way for both.
+    """
+    svc = _svc()
+    latest = next((j for j in svc.jobs.recent() if j.get("kind") == "sync"), None)
+    if latest is None:
+        return jsonify({"state": None})
+    return jsonify({
+        "id": latest["id"],
+        "state": latest["state"],
+        "phase": latest["phase"],
+        "progress": _progress(latest.get("progress")),
+        "error": latest.get("error"),
+        "finished_at": latest.get("finished_at"),
+    })
+
+
 @bp.get("/jobs")
 def jobs():
     return jsonify(list(_svc().jobs.recent()))

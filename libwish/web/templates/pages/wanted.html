@@ -42,7 +42,9 @@
 {% if total == 0 %}
   {# A good state, not a failure. Owning everything you love is the end this
      whole application is aiming at, so the copy does not apologise for it. #}
-  <div class="empty">
+  {# See owned.html: these carry what a rack would have had, so the first
+     row to arrive live can take this block's place. #}
+  <div class="empty" data-view="wanted" data-group="{{ group_by }}">
     <p class="empty__head">Want list</p>
     <p class="empty__body">Nothing on the want list. Love a track on Last.fm, ListenBrainz or
       Navidrome and it lands here within a minute.</p>
