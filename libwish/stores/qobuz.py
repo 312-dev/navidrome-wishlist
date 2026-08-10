@@ -1,35 +1,35 @@
 """Qobuz, as a store you already bought from.
 
 Qobuz publishes no purchase API, so ownership is read from the server-rendered
-download pages with the logged-in session cookie. Two pages matter: a listing of
-everything bought, and a per-purchase options page carrying the download links.
+download pages with the logged-in session cookie.
 
-Recovering a track title from those pages is the delicate part, and it is worth
-explaining because getting it wrong has already cost a wrong download once.
+Every purchase is one row of the downloads table, and the row's own markup
+names each field: the track title as an attribute on the title link, the album
+and the performer as their own links beside it, and a download link carrying
+the two numbers that identify the purchase.
 
-The listing renders each purchase as
+    /account/download/68647832/6
+                      ^ order  ^ line
 
-    Title <track> <album> <artist> Quality <q> Date <d> Order # <id>
-
-with nothing separating the three name fields. The options page does not state
-the track title at all; it states the album and the artist. So the title is
-recovered by splitting the run of names on the album, which is known exactly.
-A self-titled release puts the album string in twice, so every occurrence is
-tried and the split whose trailing remainder is a recognisable artist wins.
+The order is the transaction and the line is the item within it, so neither
+number identifies a purchase on its own. Buying five tracks at once produces
+five rows sharing one order, whose lines are not necessarily consecutive.
+Reading only line 1, which is what this did until the markup was looked at
+properly, collapses such an order into a single purchase and loses the rest
+without saying so.
 
 What this provider must never do is decide whether a purchase is the track
 someone asked for. It reports what it found; the pipeline matches. Scoring a
-claim against the listing row as a whole is precisely how a request for
-CHVRCHES "Lies" once collected their `Such Great Heights (From "Tell Me Lies
-Season 3")`: the word occurs in the tie-in credit.
+claim against the row as a whole is precisely how a request for CHVRCHES
+"Lies" once collected their `Such Great Heights (From "Tell Me Lies Season
+3")`: the word occurs in the tie-in credit. Reading each labelled field on its
+own is what keeps an album and a credit out of a title.
 """
 
 from __future__ import annotations
 
 import html as H
-import json
 import re
-import unicodedata
 from pathlib import Path
 from typing import Any, Iterator, Sequence
 
@@ -48,32 +48,26 @@ DOWNLOADS_PATH = "/profile/downloads/track"
 FORMAT_IDS = {"flac": (27, 7, 6), "mp3": (5,)}
 FORMAT_NAMES = {27: "hi-res-192", 7: "hi-res", 6: "CD-FLAC", 5: "MP3"}
 
-# Labels on the us-en storefront that delimit a listing row's name fields.
-_ROW_START, _ROW_END = "Title", "Quality"
+# The class the storefront marks each purchase with. Splitting on it is what
+# bounds a row, so every field below is searched within one purchase rather
+# than across a window that may have run into its neighbour.
+_ROW_CLASS = "account-purchases__table-row"
 
-
-def _fold(text: str) -> str:
-    """Casefold to bare alphanumerics, decomposing accents first.
-
-    Returns "" for text that is entirely non-alphanumeric, which some artist
-    names are. Callers must treat "" as unusable rather than as a value that
-    matches anything.
-    """
-    text = unicodedata.normalize("NFKD", text or "")
-    text = "".join(c for c in text if not unicodedata.combining(c))
-    return re.sub(r"[^a-z0-9]", "", text.lower())
+_LINK = re.compile(r"/account/download/(\d+)/(\d+)")
+_TITLE = re.compile(r'"account-purchases__album-title"\s*>(.*?)</span>', re.S)
+_ALBUM = re.compile(r'account-purchases__track--favorites"[^>]*>(.*?)</a>', re.S)
+_ARTIST = re.compile(r'"account-purchases__album-artist"\s*>(.*?)</span>', re.S)
+_QUALITY = re.compile(
+    r'table-header--quality.*?"account-purchases__date"\s*>(.*?)</span>', re.S)
+_DATE = re.compile(
+    r'table-header--date.*?"account-purchases__date"\s*>(.*?)</span>', re.S)
+# The exact string a link states, where the element's own text is the same
+# name padded with the template's indentation.
+_ATTR_TITLE = re.compile(r'title="([^"]*)"')
 
 
 def _strip_html(fragment: str) -> str:
     return re.sub(r"\s+", " ", H.unescape(re.sub(r"<[^>]+>", " ", fragment))).strip()
-
-
-def _jstr(raw: str) -> str:
-    """Decode a JSON string body, which arrives with \\uXXXX escapes intact."""
-    try:
-        return json.loads(f'"{raw}"')
-    except ValueError:
-        return H.unescape(raw)
 
 
 @register
@@ -121,7 +115,7 @@ class QobuzStore:
         if self._is_signin(res):
             return StoreHealth(ok=True, authed=False, detail="signed out",
                                checked_at=int(time.time()), owned_count=None)
-        count = len(self._entry_ids(res.text()))
+        count = len(self._rows(res.text()))
         return StoreHealth(ok=True, authed=True, detail="", checked_at=int(time.time()),
                            owned_count=count)
 
@@ -163,113 +157,87 @@ class QobuzStore:
         if self._is_signin(res):
             raise StoreAuthError("Qobuz session is not signed in", code="signed_out",
                                  provider_id=self.id)
-        for entry_id, row_text in self._rows(res.text()):
-            item = self._owned_item(entry_id, row_text)
+        for row in self._rows(res.text()):
+            item = self._owned_item(row)
             if item is not None:
                 yield item
 
     def expand(self, item: OwnedItem) -> Iterator[OwnedItem]:
+        """Nothing to expand: the listing is already one row per track.
+
+        An order containing several tracks is not a container in the sense this
+        hook exists for. Its tracks are separate rows carrying separate download
+        links, so they arrive from `list_owned` already separated.
+        """
         yield item
 
-    @staticmethod
-    def _entry_ids(page: str) -> list[str]:
-        return re.findall(r"/account/download/(\d+)/1", page)
+    @classmethod
+    def _rows(cls, page: str) -> list[dict[str, str]]:
+        """Each purchase, as the fields its own markup labels.
 
-    @staticmethod
-    def _rows(page: str) -> list[tuple[str, str]]:
-        """Each purchase as (entry_id, rendered row text).
-
-        The window is generous because the row's own labels are what get
-        anchored on; leading page furniture is harmless.
+        A block with no download link is not a purchase: the split also yields
+        whatever precedes the first row, and the table's own furniture.
         """
-        rows, prev = [], 0
-        for m in re.finditer(r"/account/download/(\d+)/1", page):
-            rows.append((m.group(1), _strip_html(page[prev:m.end()])[-2000:]))
-            prev = m.end()
+        rows: list[dict[str, str]] = []
+        for block in page.split(_ROW_CLASS)[1:]:
+            link = _LINK.search(block)
+            if link is None:
+                continue
+            order, line = link.groups()
+            rows.append({
+                "order": order,
+                "line": line,
+                "title": cls._field(block, _TITLE),
+                "album": cls._field(block, _ALBUM),
+                "artist": cls._field(block, _ARTIST),
+                "quality": cls._field(block, _QUALITY),
+                "date": cls._field(block, _DATE),
+            })
         return rows
 
-    def _options(self, entry_id: str) -> tuple[str | None, str, str]:
-        """(order_id, album, artist) from a purchase's options page."""
-        try:
-            page = self.http.get(f"/account/download/{entry_id}/1").text()
-        except TransientError:
-            raise
-        except Exception as exc:
-            self.log.warning("options page unreadable", context={"entry": entry_id, "err": str(exc)})
-            return None, "", ""
-        order = re.search(rf"/account/download/track/{entry_id}/1/(\d+)/", page)
-        artist_m = re.search(r'"(?:artistName|performer)":"([^"]*)"', page)
-        album_m = re.search(r'"album":"([^"]*)"', page)
-        artist = _jstr(artist_m.group(1)) if artist_m else ""
-        album = _jstr(album_m.group(1)) if album_m else ""
-        # The album field renders as "Artist - Album".
-        if artist and album.lower().startswith(artist.lower() + " - "):
-            album = album[len(artist) + 3:]
-        return (order.group(1) if order else None), album, artist
-
     @staticmethod
-    def split_row(row_text: str, album: str, *artist_hints: str) -> tuple[str, str]:
-        """Split a listing row into (track_title, artist), or ("", "") if it cannot be.
+    def _field(block: str, pattern: re.Pattern[str]) -> str:
+        """One labelled field of a row, preferring what a link states exactly.
 
-        `artist_hints` are candidate artist spellings. The options page names the
-        composer for classical releases while the row carries the performer, so
-        more than one hint may be needed to find the boundary. A hint only
-        locates the split; it grants nothing, because the recovered title is
-        still compared by the matcher afterwards.
+        The element's text is the same name wrapped in template indentation,
+        which collapses cleanly enough, but a `title` attribute is the name
+        with nothing around it and is used wherever the markup carries one.
         """
-        end = row_text.rfind(_ROW_END)
-        if end < 0:
-            return "", ""
-        start = row_text.rfind(_ROW_START, 0, end)
-        if start < 0:
-            return "", ""
-        span = re.sub(r"\s+", " ", row_text[start + len(_ROW_START):end]).strip()
-        album = re.sub(r"\s+", " ", album or "").strip()
-        if not album:
-            return "", ""
-        wanted = {_fold(h) for h in artist_hints if _fold(h)}
-        low, target = span.lower(), album.lower()
-        at = low.find(target)
-        while at >= 0:
-            title, who = span[:at].strip(), span[at + len(album):].strip()
-            if title and (not wanted or _fold(who) in wanted):
-                return title, who
-            at = low.find(target, at + 1)
-        return "", ""
+        found = pattern.search(block)
+        if found is None:
+            return ""
+        inner = found.group(1)
+        stated = _ATTR_TITLE.search(inner)
+        if stated is not None:
+            return re.sub(r"\s+", " ", H.unescape(stated.group(1))).strip()
+        return _strip_html(inner)
 
-    def _owned_item(self, entry_id: str, row_text: str) -> OwnedItem | None:
-        order, album, artist = self._options(entry_id)
-        if not order:
-            return None
-        title, row_artist = self.split_row(row_text, album, artist)
-        if not title:
-            # No hint at all, which accepts whatever name trails the album.
-            # Enumeration is not matching: reporting an item the matcher will
-            # judge is safe, whereas skipping it loses a purchase outright. A
-            # classical release reaches here, because the options page names the
-            # composer while the row carries the performer.
-            title, row_artist = self.split_row(row_text, album)
-        if not title:
+    def _owned_item(self, row: dict[str, str]) -> OwnedItem | None:
+        if not row["title"]:
             # Reporting an item whose title could not be established would hand
             # the matcher a blank to score against, and a blank matches nothing
             # or everything depending on the comparison. Omit it instead.
-            self.log.warning("could not recover a title", context={"entry": entry_id})
+            self.log.warning("could not recover a title",
+                             context={"order": row["order"], "line": row["line"]})
             return None
-        quality = re.search(r"\bQuality\s+(\S+)", row_text)
+        # Both numbers, because neither is unique on its own: one order covers
+        # every track bought together, and line numbers restart with each order.
+        key = f'{row["order"]}/{row["line"]}'
         return OwnedItem(
             store=self.id,
-            item_key=entry_id,
+            item_key=key,
             kind="track",
-            artist=row_artist or artist,
-            title=title,
-            release_title=album or None,
+            artist=row["artist"],
+            title=row["title"],
+            release_title=row["album"] or None,
             parent_key=None,
-            purchased_at=None,
+            purchased_at=None,      # the row states a date, but not which way round
             duration_s=None,        # the download pages do not state a duration
             track_number=None,
-            formats=("flac",) if (quality and "res" in quality.group(1).lower()) else ("flac", "mp3"),
-            ids=Identifiers(store_track_id=entry_id),
-            raw={"order": order, "album": album, "options_artist": artist},
+            formats=("flac",) if "res" in row["quality"].lower() else ("flac", "mp3"),
+            ids=Identifiers(store_track_id=key),
+            raw={"order": row["order"], "line": row["line"], "album": row["album"],
+                 "quality": row["quality"], "purchased_on": row["date"]},
         )
 
     # --- fetch ----------------------------------------------------------
@@ -278,11 +246,10 @@ class QobuzStore:
                  progress) -> "DownloadResult":
         from ..models import DownloadResult
 
-        order = (item.raw or {}).get("order")
-        if not order:
-            order, _, _ = self._options(item.item_key)
-        if not order:
-            raise StoreFormatUnavailable("no download order for this purchase",
+        order, line = self._key_parts(item)
+        token = (item.raw or {}).get("download_id") or self._download_id(order, line)
+        if not token:
+            raise StoreFormatUnavailable("no download link for this purchase",
                                          code="no_order", provider_id=self.id)
 
         codes: list[int] = []
@@ -294,7 +261,7 @@ class QobuzStore:
 
         dest_dir.mkdir(parents=True, exist_ok=True)
         for code in codes:
-            url = self._signed_url(item.item_key, order, code)
+            url = self._signed_url(order, line, token, code)
             if not url:
                 continue
             result = self._fetch(url, dest_dir, code, progress)
@@ -307,9 +274,41 @@ class QobuzStore:
         raise StoreFormatUnavailable("no requested format could be downloaded",
                                      code="no_format", provider_id=self.id)
 
-    def _signed_url(self, entry_id: str, order: str, code: int) -> str | None:
+    @staticmethod
+    def _key_parts(item: OwnedItem) -> tuple[str, str]:
+        """The order and line this purchase was enumerated as.
+
+        A key recorded before the line number was read is the order alone, and
+        line 1 is the right reading of it: line 1 links are the only ones the
+        reader of the time matched, so that is the purchase it filed.
+        """
+        raw = item.raw or {}
+        if raw.get("order") and raw.get("line"):
+            return str(raw["order"]), str(raw["line"])
+        order, _, line = (item.item_key or "").partition("/")
+        return order, line or "1"
+
+    def _download_id(self, order: str, line: str) -> str | None:
+        """The third number a signed download URL needs, from the options page.
+
+        Only wanted at download time. Enumeration used to fetch this page for
+        every row to recover an album name, which the listing states itself.
+        """
         try:
-            body = self.http.get(f"/account/download/track/{entry_id}/1/{order}/{code}").json()
+            page = self.http.get(f"/account/download/{order}/{line}").text()
+        except TransientError:
+            raise
+        except Exception as exc:
+            self.log.warning("options page unreadable",
+                             context={"order": order, "line": line, "err": str(exc)})
+            return None
+        found = re.search(rf"/account/download/track/{order}/{line}/(\d+)/", page)
+        return found.group(1) if found else None
+
+    def _signed_url(self, order: str, line: str, token: str, code: int) -> str | None:
+        try:
+            body = self.http.get(
+                f"/account/download/track/{order}/{line}/{token}/{code}").json()
         except Exception:
             return None
         return body.get("url") if isinstance(body, dict) else None
