@@ -366,6 +366,16 @@ evaluation.
 | 4 | `version` qualifier sets differ | `VERSION_MISMATCH` |
 | 5 | Both durations known and they differ by more than 15s | `DURATION_MISMATCH` |
 
+Gate 4 is the one gate a caller is allowed to overrule, and only one does.
+`libwish/sync.py::_version_variants` accepts a purchase refused solely at gate
+4, because a purchase sweep runs with nobody present to be asked and leaving a
+track on the list its owner has already bought is the worse answer. It is
+fenced by mutual uniqueness rather than by a score: the purchase must be the
+only candidate that wanted track could be, and that wanted track the only one
+the purchase could be. Nothing above gate 4 is relaxed, so "the same song" is
+still decided by gates 1 through 3, and a single claim refuses exactly as this
+table says.
+
 ```python
 def title_gate(q: NormalizedTitle, c: NormalizedTitle) -> tuple[bool, str]:
     if q.base == c.base:                      return True,  "base_exact"

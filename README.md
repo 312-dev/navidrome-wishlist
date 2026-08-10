@@ -25,12 +25,22 @@ rather buy simply lose track of what they meant to buy. This is the list.
 - **Files what you bought.** Tell it you bought something and it finds that
   purchase in your account, verifies the file is what it claims to be, and
   writes it into your library. Then it asks your music server to rescan.
+- **Sweeps every shop at once.** One button reads your whole purchase history
+  from every shop in parallel and files everything on the list it recognises,
+  so buying five records in one go does not mean marking off five records one
+  at a time.
 - **Refuses when it is not sure.** A download only happens when the purchase
   matches the track you wanted, on artist, title and length. Anything short of
   that is shown to you with the candidate it rejected and the score it gave,
   and nothing is downloaded. From there you can override the score, or point
   at the exact purchase in your account yourself; either way the record says
   it was your call, not the matcher's.
+
+  The sweep bends that in one place, because there is nobody standing there to
+  ask. A purchase that is the same song in a different mastering is filed, but
+  only where it is the only purchase that track could be and the only track
+  that purchase could be. Anything less certain than that is left alone and
+  reported.
 
 It buys nothing on your behalf and it takes no payment details. You buy the
 record, in your own browser, from the shop. This finds it afterwards.

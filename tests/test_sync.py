@@ -174,20 +174,91 @@ class Restraint(Base):
         self.assertEqual(out["queue"]["queued"], 0)
         self.assertEqual(self.enqueued, [])
 
-    def test_a_remaster_is_refused_exactly_as_a_manual_claim_refuses_it(self):
-        # "Gold Dust Woman" against "Gold Dust Woman (2004 Remaster)" is
-        # VERSION_MISMATCH: a remaster is a different recording, and the
-        # matcher refuses it on purpose. A sweep inherits that rather than
-        # softening it, which is the whole reason it reuses the same matcher.
-        #
-        # Worth a test because it looks like a miss and is not one. The first
-        # live sweep reported this as "too close to call" and it read as a bug.
+class TheOnlyVersionOfASong(Base):
+    """A version qualifier is allowed to be the one thing that differs.
+
+    "Gold Dust Woman" against "Gold Dust Woman (2004 Remaster)" is
+    VERSION_MISMATCH, and a claim refuses it: a remaster is a different
+    recording, and a person is there to be shown that and asked. A sweep has
+    nobody to ask, so where the purchase is the only one the track could be it
+    counts. What fences it is uniqueness in both directions, not a lower bar.
+    """
+
+    def test_the_only_version_in_the_account_is_filed(self):
+        track_id = self.a_track("Fleetwood Mac", "Gold Dust Woman")
+        shop = FakeStore("qobuz", "Qobuz",
+                         [item("k1", "Fleetwood Mac", "Gold Dust Woman (2004 Remaster)")])
+        out = self.sweep([shop])
+        self.assertEqual(out["queue"]["queued"], 1, out["queue"])
+        self.assertEqual(self.enqueued,
+                         [{"kind": "claim", "track_id": track_id, "provider_id": "qobuz"}])
+
+    def test_the_audit_row_says_the_version_differed(self):
+        # The reason this was accepted has to survive in the record, because
+        # the file that arrives is not the recording the list asked for and
+        # nobody was asked about it.
+        track_id = self.a_track("Fleetwood Mac", "Gold Dust Woman")
+        shop = FakeStore("qobuz", "Qobuz",
+                         [item("k1", "Fleetwood Mac", "Gold Dust Woman (2004 Remaster)")])
+        self.sweep([shop])
+        conn = self.svc.db()
+        try:
+            row = conn.execute("SELECT outcome, reasons, candidate_json FROM match_decision"
+                               " WHERE track_id=? ORDER BY id DESC LIMIT 1",
+                               (track_id,)).fetchone()
+        finally:
+            conn.close()
+        self.assertEqual(row["outcome"], "swept")
+        self.assertIn("version", row["reasons"])
+        # The claim downloads what this row names rather than matching again,
+        # so an audit row without the key would queue a claim that refuses.
+        self.assertIn("k1", row["candidate_json"])
+
+    def test_two_versions_of_the_same_song_are_refused(self):
+        # The case the uniqueness fence exists for. Picking one unattended is
+        # a guess, and a wrong one is silent: the track leaves the list and
+        # the library gains a recording nobody chose.
         self.a_track("Fleetwood Mac", "Gold Dust Woman")
+        shop = FakeStore("qobuz", "Qobuz", [
+            item("k1", "Fleetwood Mac", "Gold Dust Woman (2004 Remaster)"),
+            item("k2", "Fleetwood Mac", "Gold Dust Woman (Live)"),
+        ])
+        out = self.sweep([shop])
+        self.assertEqual(out["queue"]["queued"], 0, out["queue"])
+        self.assertEqual(self.enqueued, [])
+        self.assertEqual(len(out["queue"]["near"]), 1)
+
+    def test_one_purchase_two_list_entries_wanting_it_is_refused(self):
+        # The other direction of the same fence: the purchase is unique to
+        # each track, but neither track is unique to the purchase.
+        self.a_track("Fleetwood Mac", "Gold Dust Woman")
+        self.a_track("Fleetwood Mac", "Gold Dust Woman (Remastered)")
         shop = FakeStore("qobuz", "Qobuz",
                          [item("k1", "Fleetwood Mac", "Gold Dust Woman (2004 Remaster)")])
         out = self.sweep([shop])
         self.assertEqual(out["queue"]["queued"], 0, out["queue"])
         self.assertEqual(self.enqueued, [])
+
+    def test_a_different_song_is_still_refused_however_alone_it_is(self):
+        # Only the version qualifier is relaxed. The artist and title gates
+        # still have to pass, or "the only purchase in the account" would
+        # become a licence to file anything at all.
+        self.a_track("Audioslave", "Like a Stone")
+        shop = FakeStore("qobuz", "Qobuz", [item("k1", "CHVRCHES", "Lies")])
+        out = self.sweep([shop])
+        self.assertEqual(out["queue"]["queued"], 0, out["queue"])
+        self.assertEqual(self.enqueued, [])
+
+    def test_an_exact_match_wins_the_purchase_before_a_version_variant_sees_it(self):
+        # Written because the version pass runs second and could otherwise
+        # spend a purchase that the ordinary pass was going to file exactly.
+        exact = self.a_track("Fleetwood Mac", "Gold Dust Woman (2004 Remaster)")
+        self.a_track("Fleetwood Mac", "Gold Dust Woman")
+        shop = FakeStore("qobuz", "Qobuz",
+                         [item("k1", "Fleetwood Mac", "Gold Dust Woman (2004 Remaster)")])
+        out = self.sweep([shop])
+        self.assertEqual(out["queue"]["queued"], 1, out["queue"])
+        self.assertEqual([e["track_id"] for e in self.enqueued], [exact])
 
 
 class OneShopDown(Base):

@@ -148,6 +148,31 @@ class Base(unittest.TestCase):
         finally:
             conn.close()
 
+    def swept(self, track_id, item_key, store_id="stub", title="", artist="",
+              why="matched by a purchase sweep"):
+        """Record the decision a purchase sweep writes before queueing a claim.
+
+        Same shape as `pick` and for the same reason: it names one purchase
+        rather than a score. Written here rather than by running a sweep, so
+        that what is under test is the claim reading the row back.
+        """
+        import json
+        import time
+        from libwish import identity, match
+        conn = self.svc.db()
+        try:
+            conn.execute(
+                "INSERT INTO match_decision(track_id, decided_at, phase, provider,"
+                " matcher_version, lexicon_hash, outcome, reasons, query_json,"
+                " candidate_json, candidates_considered, chosen_store_id)"
+                " VALUES(?,?,?,?,?,?,'swept',?,'{}',?,0,?)",
+                (track_id, int(time.time()), "sync", store_id,
+                 getattr(match, "MATCHER_VERSION", "1"), identity.lexicon_hash(), why,
+                 json.dumps({"item_key": item_key, "title": title, "artist": artist}),
+                 store_id))
+        finally:
+            conn.close()
+
     def purchased_item_key(self, track_id):
         conn = self.svc.db()
         try:
@@ -441,6 +466,72 @@ class UserPick(Base):
         finally:
             conn.close()
         self.assertEqual(outcomes, ["user_picked", "downloaded_by_pick"])
+
+
+class SweptDecisions(Base):
+    """A claim honours the purchase a sweep already chose, without rematching.
+
+    This is the seam the version rule depends on. A sweep may accept a purchase
+    the matcher scores at nothing, because it differs from the wanted track only
+    by a version qualifier and is the only one it could be. If the claim then
+    matched again from scratch it would refuse that exact purchase, and the
+    sweep's whole answer would be undone one job later, reported to the reader
+    as a failed claim on a track they had just been told was filed.
+    """
+
+    def test_a_version_variant_a_sweep_chose_is_downloaded_rather_than_rematched(self):
+        track_id = self.a_track("Fleetwood Mac", "Gold Dust Woman")
+        store = StubStore([owned("Fleetwood Mac", "Gold Dust Woman (2004 Remaster)", "a")])
+        self.swept(track_id, "a", title="Gold Dust Woman (2004 Remaster)",
+                   artist="Fleetwood Mac")
+        self.run_claim(track_id, store)
+        self.assertEqual(store.downloaded, ["a"])
+        self.assertEqual(self.purchased_item_key(track_id), "a")
+
+    def test_the_same_claim_without_the_sweep_row_refuses(self):
+        # The other half of the pair, and what makes the test above mean
+        # something: the purchase is one the matcher genuinely will not take.
+        track_id = self.a_track("Fleetwood Mac", "Gold Dust Woman")
+        store = StubStore([owned("Fleetwood Mac", "Gold Dust Woman (2004 Remaster)", "a")])
+        with self.assertRaises(MatchRefused):
+            self.run_claim(track_id, store)
+        self.assertEqual(store.downloaded, [])
+
+    def test_the_choice_is_spent_once(self):
+        track_id = self.a_track("Fleetwood Mac", "Gold Dust Woman")
+        store = StubStore([owned("Fleetwood Mac", "Gold Dust Woman (2004 Remaster)", "a")])
+        self.swept(track_id, "a", title="Gold Dust Woman (2004 Remaster)",
+                   artist="Fleetwood Mac")
+        self.run_claim(track_id, store)
+
+        # Back on the list later for any reason: the old sweep row must not
+        # still be licensing downloads of whatever it once chose.
+        self.svc.tracks.set_status(track_id, "queued")
+        again = StubStore([owned("Fleetwood Mac", "Gold Dust Woman (2004 Remaster)", "a")])
+        with self.assertRaises(MatchRefused):
+            self.run_claim(track_id, again)
+        self.assertEqual(again.downloaded, [])
+
+    def test_both_the_sweep_and_the_download_stay_on_the_audit_trail(self):
+        # The sweep's row says a machine chose this; the pipeline's says what
+        # it then did. Neither is written as a user confirmation, because
+        # nobody looked at it.
+        track_id = self.a_track("Fleetwood Mac", "Gold Dust Woman")
+        self.swept(track_id, "a", title="Gold Dust Woman (2004 Remaster)",
+                   artist="Fleetwood Mac")
+        self.run_claim(
+            track_id, StubStore([owned("Fleetwood Mac", "Gold Dust Woman (2004 Remaster)", "a")]))
+        conn = self.svc.db()
+        try:
+            rows = [(r["outcome"], r["reasons"]) for r in conn.execute(
+                "SELECT outcome, reasons FROM match_decision WHERE track_id=? ORDER BY id",
+                (track_id,))]
+        finally:
+            conn.close()
+        self.assertEqual([r[0] for r in rows], ["swept", "downloaded_by_pick"])
+        self.assertNotIn("user_confirmed", [r[0] for r in rows])
+        self.assertIn("sweep", rows[1][1],
+                      "the download must not describe itself as picked by hand")
 
 
 class Endpoints(Base):
