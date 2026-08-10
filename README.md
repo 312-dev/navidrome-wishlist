@@ -91,6 +91,45 @@ The ingest endpoint only exists when `COOKIE_BROKER_TOKEN` is set. It accepts
 live credentials, so it should not be reachable at all unless you meant it to
 be.
 
+To connect it, set that token, then install
+[Cookie Broker](https://github.com/312-dev/cookie-broker), open its options and
+type this app's address. It reads what this app publishes about itself:
+
+```
+GET /.well-known/cookie-broker.json
+```
+
+```json
+{
+  "protocol": 1,
+  "id": "library-wishlist",
+  "name": "Library Wishlist",
+  "receiver": { "ingest": "/auth/ingest/{site}", "status": "/auth/status/{site}", "auth": "bearer" },
+  "sites": [
+    {
+      "id": "qobuz",
+      "label": "Qobuz",
+      "cookieUrl": "https://www.qobuz.com/",
+      "cookieDomain": "qobuz.com",
+      "requiredCookie": "qobuz-session",
+      "signInUrl": "https://www.qobuz.com/signin"
+    }
+  ]
+}
+```
+
+That document is generated from `COOKIE_SITES` in `libwish/web/app.py`, and
+lists only the shops this process actually has a session keeper for, so it
+cannot advertise a shop it would then fail to receive. It is served only when
+the token is set, because otherwise it would be describing an endpoint that
+does not exist. Your browser asks you about each site by name before anything
+is read.
+
+The extension is a general one and this is the only thing tying the two
+together. Nothing about it is specific to this app: the format is
+`docs/PROTOCOL.md` in that repo, and any application that wants a browser
+session can publish the same document.
+
 ## Install it on a phone
 
 It ships a manifest and a service worker, so Chrome on Android offers to

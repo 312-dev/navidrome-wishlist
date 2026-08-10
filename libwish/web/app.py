@@ -161,12 +161,23 @@ def _wire_providers(app: Flask):
 # The probe is a page that is served only to a signed-in visitor and redirects
 # to a login screen otherwise, which is what lets a keepalive tell a live
 # session from a dead one without parsing anything.
+#
+# The browser-facing half of each entry is what this app publishes at
+# /.well-known/cookie-broker.json for the Cookie Broker extension to install.
+# It lives here, beside the probe, so the list of sites this app wants a
+# session for is written once. Two lists would drift, and the way they would
+# drift is a site being kept alive that the extension was never told to seed.
 COOKIE_SITES = {
     "qobuz": {
         "probe_url": "https://www.qobuz.com/profile/downloads/track",
         "jar_env": "LW_STORE_QOBUZ_JAR_PATH",
         "header_env": "LW_STORE_QOBUZ_COOKIE_FILE",
         "jar_name": "qobuz_jar.json",
+        "label": "Qobuz",
+        "cookie_url": "https://www.qobuz.com/",
+        "cookie_domain": "qobuz.com",
+        "required_cookie": "qobuz-session",
+        "sign_in_url": "https://www.qobuz.com/signin",
     },
 }
 
@@ -235,6 +246,65 @@ def _register_cookie_broker(app: Flask, settings: Settings) -> None:
         log.info("cookie broker mounted", context={"sites": sorted(keepers)})
     except Exception as exc:
         log.warning("cookie broker not mounted: %s", exc)
+        return
+    _publish_broker_profile(app, sorted(keepers))
+
+
+def _publish_broker_profile(app: Flask, sites: list[str]) -> None:
+    """Advertise what a browser extension should seed, at a fixed address.
+
+    Someone connects this app to the Cookie Broker extension by typing its
+    address; the extension reads the document below and asks the browser for
+    the permissions it names. Protocol and field meanings are in that project's
+    docs/PROTOCOL.md.
+
+    Published only alongside a mounted ingest endpoint, and listing only the
+    sites that actually have a keeper. A profile advertising a site this
+    process cannot receive would install cleanly and then fail on every push,
+    which is a worse failure than not being advertised: the reader would be
+    looking for a problem in their browser rather than in this app's
+    configuration.
+
+    `receiver.base` is deliberately absent. The extension takes the address it
+    fetched this from, so the document stays correct for every deployment
+    rather than naming whichever one happened to write it.
+    """
+    from flask import jsonify
+
+    profile = {
+        "protocol": 1,
+        "id": "library-wishlist",
+        "name": "Library Wishlist",
+        "homepage": "https://github.com/312-dev/navidrome-wishlist",
+        "receiver": {
+            "ingest": "/auth/ingest/{site}",
+            "status": "/auth/status/{site}",
+            "auth": "bearer",
+        },
+        "sites": [
+            {
+                "id": site,
+                "label": COOKIE_SITES[site]["label"],
+                "cookieUrl": COOKIE_SITES[site]["cookie_url"],
+                "cookieDomain": COOKIE_SITES[site]["cookie_domain"],
+                "requiredCookie": COOKIE_SITES[site]["required_cookie"],
+                "signInUrl": COOKIE_SITES[site]["sign_in_url"],
+            }
+            for site in sites
+            if site in COOKIE_SITES
+        ],
+    }
+
+    @app.get("/.well-known/cookie-broker.json")
+    def broker_profile():  # noqa: ANN202 - Flask view
+        # Unauthenticated on purpose. It carries no secret: it is a list of
+        # which shops this app wants a session for, and the address it is
+        # being read from is already known to whoever is reading it. Requiring
+        # the token here would mean the token had to be typed before the
+        # profile that explains what the token is for could be seen.
+        return jsonify(profile)
+
+    log.info("broker profile published", context={"sites": sites})
 
 
 def serve(settings: Settings | None = None) -> None:
