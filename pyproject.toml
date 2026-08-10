@@ -3,6 +3,9 @@ name = "library-wishlist"
 version = "1.0.0"
 description = "Self-hosted queue of loved tracks from Last.fm and ListenBrainz, with buy links and purchase-verified downloads."
 requires-python = ">=3.10"
+classifiers = [
+    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
+]
 # Three dependencies, all of them serving the web layer. Everything else
 # (HTTP, identity, matching, storage, scheduling) is standard library, which is
 # what keeps the container small and the supply chain short for an application

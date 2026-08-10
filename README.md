@@ -157,3 +157,8 @@ and wrong on an open port.
 and matching rules, the provider contracts, the runtime, and the design. They
 describe why the matcher refuses what it refuses, which is the part worth
 reading if you plan to trust it with your money.
+
+## Licence
+
+AGPL-3.0-or-later. See `LICENSE`. Running a modified copy as a network service
+means publishing your changes.
