@@ -130,18 +130,17 @@ class Restraint(Base):
         rows = self.svc.tracks.get(track_id)
         self.assertIsNone(rows["purchased_at"])
 
-    def test_a_near_miss_is_reported_rather_than_silently_dropped(self):
-        # Unconditional. This assertion was once written as `if near:`, which
-        # passes when the list is empty, i.e. exactly when the behaviour it
-        # claims to check is absent.
+    def test_an_unrelated_purchase_is_not_called_a_near_miss(self):
+        # A wanted track with nothing resembling it in the account. Reporting
+        # that as "too close to call" is what the first live sweep did: four
+        # unrelated purchases were each reported as nearly matching whichever
+        # row happened to sort first, all at zero. "You have not bought this"
+        # is not a near miss.
         self.a_track("Audioslave", "Like a Stone")
         shop = FakeStore("qobuz", "Qobuz", [item("k1", "CHVRCHES", "Lies")])
         out = self.sweep([shop])
-        near = out["queue"]["near"]
-        self.assertEqual(len(near), 1, near)
-        self.assertEqual(near[0]["shop"], "Qobuz")
-        self.assertEqual(near[0]["purchase"], "Lies")
-        self.assertEqual(near[0]["needs"], MATCH_CONFIRM_MIN)
+        self.assertEqual(out["queue"]["queued"], 0)
+        self.assertEqual(out["queue"]["near"], [])
 
     def test_a_purchase_already_filed_is_not_filed_again(self):
         # The filed purchase belongs to a DIFFERENT track, and a second track
@@ -162,16 +161,33 @@ class Restraint(Base):
         self.assertEqual(out["queue"]["queued"], 0, out["queue"])
         self.assertEqual(self.enqueued, [])
 
-    def test_one_purchase_cannot_be_spent_on_two_tracks(self):
+    def test_two_indistinguishable_purchases_are_refused_rather_than_guessed(self):
         self.a_track("CHVRCHES", "Lies")
         shop = FakeStore("qobuz", "Qobuz", [
             item("k1", "CHVRCHES", "Lies"),
             item("k2", "CHVRCHES", "Lies"),
         ])
         out = self.sweep([shop])
-        # Two claims for one row would race each other to the same file.
-        self.assertEqual(out["queue"]["queued"], 1)
-        self.assertEqual(len(self.enqueued), 1)
+        # The matcher refuses a tie rather than picking the first, and a sweep
+        # inherits that. Choosing one unattended is exactly the guess this is
+        # built not to make.
+        self.assertEqual(out["queue"]["queued"], 0)
+        self.assertEqual(self.enqueued, [])
+
+    def test_a_remaster_is_refused_exactly_as_a_manual_claim_refuses_it(self):
+        # "Gold Dust Woman" against "Gold Dust Woman (2004 Remaster)" is
+        # VERSION_MISMATCH: a remaster is a different recording, and the
+        # matcher refuses it on purpose. A sweep inherits that rather than
+        # softening it, which is the whole reason it reuses the same matcher.
+        #
+        # Worth a test because it looks like a miss and is not one. The first
+        # live sweep reported this as "too close to call" and it read as a bug.
+        self.a_track("Fleetwood Mac", "Gold Dust Woman")
+        shop = FakeStore("qobuz", "Qobuz",
+                         [item("k1", "Fleetwood Mac", "Gold Dust Woman (2004 Remaster)")])
+        out = self.sweep([shop])
+        self.assertEqual(out["queue"]["queued"], 0, out["queue"])
+        self.assertEqual(self.enqueued, [])
 
 
 class OneShopDown(Base):

@@ -110,61 +110,78 @@ class SyncPipeline:
         return results
 
     def _match(self, results: list[ShopResult]):
-        """Pair unfiled purchases with wanted tracks, above the gate only."""
+        """Pair unfiled purchases with wanted tracks, above the confirm band.
+
+        The matcher is asked in its own direction: a wanted track is the query
+        and the purchases are the candidates, exactly as a single claim asks
+        it. It is not symmetric, and asking it the other way round scores an
+        obvious pair at zero, because the version and edition handling expects
+        the release-shaped side to be the candidate. That was this function's
+        first bug: "Gold Dust Woman" against "Gold Dust Woman (2004 Remaster)"
+        came back as no relationship at all.
+
+        The efficiency this exists for is untouched by that. Every shop is
+        still read once; what changed is only which side of the comparison the
+        loop walks.
+        """
         wanted = self.svc.tracks.queued()
         if not wanted:
             return [], []
-        candidates = [identity.build_identity(t["artist"], t["title"]) for t in wanted]
 
-        queued: list[tuple[int, str, str]] = []
-        near: list[dict] = []
-        # A track can only be claimed once per sweep, and a purchase can only
-        # be spent on one track. Without both, two similar purchases would
-        # queue two claims for the same row and race each other to the same
-        # destination file.
-        taken_tracks: set[int] = set()
-
+        # Every unfiled purchase, across every shop, as one candidate list.
+        pool: list[tuple[Any, Any]] = []
         for result in results:
             filed = self.svc.tracks.owned_item_keys(result.store.id)
             for item in result.items:
                 # Already filed against something. This is what makes a sweep
                 # cheap to re-run and safe to press twice.
-                if item.item_key in filed:
-                    continue
+                if item.item_key not in filed:
+                    pool.append((result.store, item))
+        if not pool:
+            return [], []
 
-                query = identity.from_owned_item(item)
-                decision, index = match.best_match(query, candidates)
-                if index is None:
-                    continue
+        candidates = [identity.from_owned_item(item) for _, item in pool]
+        queued: list[tuple[int, str, str]] = []
+        near: list[dict] = []
+        # A purchase can only be spent once. Two tracks that resemble the same
+        # recording would otherwise queue two claims for one file.
+        spent: set[int] = set()
 
-                track = wanted[index]
-                score = getattr(decision, "score", 0) or 0
-                if decision.outcome == "refused" or score < MATCH_CONFIRM_MIN:
-                    # Deliberately not recorded against the track. See the
-                    # module docstring: a near miss the reader never asked
-                    # about should not leave a refusal panel on a row they
-                    # were not looking at.
+        for track in wanted:
+            want = identity.build_identity(track["artist"], track["title"])
+            decision, index = match.best_match(want, candidates)
+            if index is None or index in spent:
+                continue
+
+            store, item = pool[index]
+            score = getattr(decision, "score", 0) or 0
+
+            if decision.outcome == "refused" or score < MATCH_CONFIRM_MIN:
+                # A zero means nothing in the account resembled this track at
+                # all, which is the ordinary case for a list of 159 wants and
+                # a handful of purchases. Reporting that as "too close to call"
+                # was this function's second bug: it turned "you have not
+                # bought this" into a near miss against whichever row happened
+                # to sort first.
+                if score > 0:
                     near.append({
-                        "shop": result.store.name,
+                        "shop": store.name,
                         "purchase": item.title,
                         "closest": f'{track["artist"]} - {track["title"]}',
                         "score": score,
                         "needs": MATCH_CONFIRM_MIN,
                     })
-                    continue
+                continue
 
-                if track["id"] in taken_tracks:
-                    continue
-                taken_tracks.add(track["id"])
-
-                # Recorded before the claim is queued, because the claim will
-                # re-derive this same match and refuse it: the confirm band is
-                # exactly the band that asks a human first. This row is that
-                # answer, given by the sweep rather than by a person, which is
-                # why it is `swept` and not `user_confirmed`.
-                self._record_sweep(track["id"], result.store.id, item, score)
-                self.svc.jobs.enqueue("claim", track_id=track["id"], provider_id=result.store.id)
-                queued.append((track["id"], result.store.name, item.title))
+            spent.add(index)
+            # Recorded before the claim is queued, because the claim will
+            # re-derive this same match and refuse it: the confirm band is
+            # exactly the band that asks a human first. This row is that
+            # answer, given by the sweep rather than by a person, which is
+            # why it is `swept` and not `user_confirmed`.
+            self._record_sweep(track["id"], store.id, item, score)
+            self.svc.jobs.enqueue("claim", track_id=track["id"], provider_id=store.id)
+            queued.append((track["id"], store.name, item.title))
 
         return queued, near
 
