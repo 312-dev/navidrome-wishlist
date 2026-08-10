@@ -165,6 +165,24 @@ class TrackRepo:
         finally:
             conn.close()
 
-    def mark_purchased(self, track_id: int, via: str) -> None:
+    def mark_purchased(self, track_id: int, via: str, item_key: str | None = None) -> None:
         self.set_status(track_id, "purchased",
-                        purchased_at=int(time.time()), purchased_via=via)
+                        purchased_at=int(time.time()), purchased_via=via,
+                        purchased_item_key=item_key)
+
+    def owned_item_keys(self, store_id: str) -> set[str]:
+        """Keys already filed against a currently-owned track at one store.
+
+        Scoped to `status IN ('purchased','owned')` rather than to every row
+        that ever recorded a key, so a track moved back to the want list by
+        `/restore` stops shadowing its old purchase. `restore` does not clear
+        `purchased_item_key` (it never touched `purchased_at`/`purchased_via`
+        either), so the column still holds the key; only the status change is
+        what makes the purchase choosable again.
+        """
+        return {r["purchased_item_key"] for r in self._rows(
+            "SELECT purchased_item_key FROM tracks"
+            " WHERE status IN ('purchased','owned') AND purchased_via=?"
+            " AND purchased_item_key IS NOT NULL",
+            (store_id,),
+        )}

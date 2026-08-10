@@ -298,6 +298,14 @@ def claim_confirm_bulk():
 def purchases(store_id: str):
     """Recent purchases at one store, for the hand-picker on a refusal panel.
 
+    Leaves out a purchase already recorded against a track this account owns
+    at this store, so the same item cannot be filed twice from here. That
+    check only works forward from the point `purchased_item_key` started
+    being recorded: a purchase filed before this column existed has no key to
+    compare and is offered regardless, deliberately, since matching it back by
+    artist and title instead would risk hiding a purchase the reader still
+    needs.
+
     The matcher never even reaches `_decide` against an empty inventory (it
     refuses with reason `empty_inventory` before building a candidate list at
     all), so a track showing a refusal panel already implies the store had
@@ -321,9 +329,18 @@ def purchases(store_id: str):
 
     from ..errors import StoreAuthError
 
+    already_owned = svc.tracks.owned_item_keys(store_id)
     found = []
+    hidden = 0
     try:
         for item in store.list_owned():
+            if item.item_key in already_owned:
+                # Not dropped for good, only left off this response: the row
+                # in `tracks` is the record of the filing, `hidden` here is
+                # just this response saying so rather than quietly shrinking,
+                # which would read as the store having lost the purchase.
+                hidden += 1
+                continue
             found.append({
                 "item_key": item.item_key,
                 "kind": item.kind,
@@ -340,7 +357,10 @@ def purchases(store_id: str):
         # for this account at all right now.
         return jsonify({"error": str(exc), "code": "signed_out"}), 409
 
-    return jsonify({"store": store_id, "purchases": found})
+    payload = {"store": store_id, "purchases": found, "hidden": hidden}
+    if hidden:
+        payload["hidden_reason"] = "already filed against a track you own at this store"
+    return jsonify(payload)
 
 
 @bp.post("/claim/<int:track_id>/pick")
@@ -434,6 +454,43 @@ def refusal_dismiss(track_id: int):
         if row is not None:
             conn.execute(
                 "UPDATE match_decision SET dismissed_at=? WHERE id=?",
+                (int(time.time()), row["id"]),
+            )
+    finally:
+        conn.close()
+    svc.bus.publish("track.updated", id=track_id, status="queued")
+    return jsonify({"ok": True})
+
+
+@bp.post("/failure/<int:track_id>/dismiss")
+def failure_dismiss(track_id: int):
+    """Mark the track's latest broken claim acknowledged.
+
+    Never a delete. `jobs` is the record of what was actually attempted, so
+    clearing a failure off the screen has to mean marking that one job read
+    rather than erasing it. A later claim writes its own row and is
+    undismissed by construction, so a claim that fails again shows the
+    failure panel again: this endpoint acknowledges one job, not the track.
+
+    Marking an already-dismissed failure dismissed again is a no-op, not an
+    error, because a reader clicking twice, or a stale tab replaying the same
+    click after a reload, is not a mistake worth surfacing.
+    """
+    svc = _svc()
+    if svc.tracks.get(track_id) is None:
+        return jsonify({"error": "no such track"}), 404
+    conn = svc.db()
+    try:
+        row = conn.execute(
+            "SELECT id FROM jobs"
+            " WHERE track_id=? AND kind='claim' AND state IN ('failed', 'interrupted')"
+            " AND dismissed_at IS NULL"
+            " ORDER BY created_at DESC, id DESC LIMIT 1",
+            (track_id,),
+        ).fetchone()
+        if row is not None:
+            conn.execute(
+                "UPDATE jobs SET dismissed_at=? WHERE id=?",
                 (int(time.time()), row["id"]),
             )
     finally:

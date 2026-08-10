@@ -19,8 +19,8 @@ from pathlib import Path
 
 from libwish.errors import LibwishError, MatchRefused, StoreAuthError, VerificationFailed
 from libwish.models import (
-    DownloadResult, Identifiers, OwnedItem, SourcePage, StoreCapabilities,
-    StoreHealth, TrackIds, LovedTrack,
+    DownloadResult, Identifiers, MATCH_AUTO_MIN, OwnedItem, SourcePage,
+    StoreCapabilities, StoreHealth, TrackIds, LovedTrack,
 )
 
 REPO = Path(__file__).resolve().parent.parent
@@ -148,6 +148,15 @@ class Base(unittest.TestCase):
         finally:
             conn.close()
 
+    def purchased_item_key(self, track_id):
+        conn = self.svc.db()
+        try:
+            row = conn.execute(
+                "SELECT purchased_item_key FROM tracks WHERE id=?", (track_id,)).fetchone()
+        finally:
+            conn.close()
+        return row["purchased_item_key"]
+
     def run_claim(self, track_id, store):
         from libwish.claim import ClaimPipeline
         pipeline = ClaimPipeline(self.svc, {"stub": store})
@@ -201,6 +210,8 @@ class TheIncident(Base):
         distinct = [p for i, p in enumerate(phases) if i == 0 or p != phases[i - 1]]
         self.assertEqual(distinct, ["session", "enumerate", "match", "download", "verify"])
         self.assertEqual(self.svc.tracks.get(track_id)["status"], "purchased")
+        self.assertEqual(self.purchased_item_key(track_id), "right",
+                         "an ordinary matched claim must record which item it downloaded")
 
 
 class ClaimSafety(Base):
@@ -247,6 +258,67 @@ class ClaimSafety(Base):
         self.confirm(track_id)
         self.run_claim(track_id, store)
         self.assertEqual(store.downloaded, ["ok"])
+
+
+class ReaderFacingRefusals(Base):
+    """What a refusal reads like on screen, not just what it decided.
+
+    Each case checks two things a fix here could trade off against each other:
+    the sentence has to be something a person can act on, and the score and
+    threshold the panel's "Confidence" line needs still have to be in the row
+    that sentence came from.
+    """
+
+    def refusal(self, track_id):
+        from libwish.web.views import refusal_for
+        conn = self.svc.db()
+        try:
+            return refusal_for(track_id, conn)
+        finally:
+            conn.close()
+
+    def test_an_artist_mismatch_names_both_artists_in_plain_language(self):
+        track_id = self.a_track("Audioslave", "Like a Stone")
+        store = StubStore([owned("CHVRCHES", "Like a Stone", "wrong-artist")])
+        with self.assertRaises(MatchRefused):
+            self.run_claim(track_id, store)
+        refusal = self.refusal(track_id)
+        self.assertIn("different artist", refusal["reasons"])
+        self.assertIn("Audioslave", refusal["reasons"])
+        self.assertIn("CHVRCHES", refusal["reasons"])
+        self.assertNotIn("agreement", refusal["reasons"],
+                         "a match ratio is not something the reader asked for")
+        self.assertEqual(refusal["threshold"], MATCH_AUTO_MIN)
+        self.assertIsNotNone(refusal["score"])
+
+    def test_a_title_mismatch_names_both_titles_in_plain_language(self):
+        track_id = self.a_track("CHVRCHES", "Lies")
+        store = StubStore([
+            owned("CHVRCHES", 'Such Great Heights (From "Tell Me Lies Season 3")', "wrong-title"),
+        ])
+        with self.assertRaises(MatchRefused):
+            self.run_claim(track_id, store)
+        refusal = self.refusal(track_id)
+        self.assertIn("different title", refusal["reasons"])
+        self.assertIn("Lies", refusal["reasons"])
+        self.assertIn("Tell Me Lies", refusal["reasons"])
+        self.assertNotIn("characters", refusal["reasons"],
+                         "the short-title gate name is not something the reader asked for")
+        self.assertEqual(refusal["threshold"], MATCH_AUTO_MIN)
+        self.assertIsNotNone(refusal["score"])
+
+    def test_nothing_close_enough_says_so_plainly(self):
+        # Passes every gate (same title, an artist spelling close enough to
+        # clear the gate) but the evidence adds up to well under the confirm
+        # floor, the case with no single gate to blame.
+        track_id = self.a_track("Radiohead", "Creep")
+        store = StubStore([owned("Raidohead", "Creep", "too-thin")])
+        with self.assertRaises(MatchRefused):
+            self.run_claim(track_id, store)
+        refusal = self.refusal(track_id)
+        self.assertIn("came close enough", refusal["reasons"])
+        self.assertEqual(refusal["threshold"], MATCH_AUTO_MIN)
+        self.assertIsNotNone(refusal["score"])
 
 
 class UserConfirmation(Base):
@@ -317,6 +389,8 @@ class UserPick(Base):
         self.pick(track_id, "wrong")
         self.run_claim(track_id, store)
         self.assertEqual(store.downloaded, ["wrong"])
+        self.assertEqual(self.purchased_item_key(track_id), "wrong",
+                         "a hand-picked claim must record which item it downloaded too")
 
     def test_a_missing_picked_item_fails_cleanly(self):
         """The purchase named at pick time is gone by the time the job runs.

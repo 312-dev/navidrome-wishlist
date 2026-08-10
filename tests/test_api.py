@@ -664,6 +664,108 @@ class RefusalDismiss(Base):
         self.assertIsNotNone(row.get("failure"))
 
 
+class FailureDismiss(Base):
+    """That a broken claim can be cleared off the screen without erasing the
+    `jobs` row it came from, and that clearing one failure never hides a
+    later one.
+    """
+
+    def fail_at(self, track_id, store="qobuz", state="failed", phase="match"):
+        """Leave a track broken, the way a real claim does: a `jobs` row in a
+        terminal state, with a phase for the panel to read.
+        """
+        import time
+
+        conn = self.svc.db()
+        try:
+            conn.execute(
+                "INSERT INTO jobs(kind, state, track_id, provider_id, phase, created_at)"
+                " VALUES('claim',?,?,?,?,?)",
+                (state, track_id, store, phase, int(time.time())))
+        finally:
+            conn.close()
+
+    def jobs_for(self, track_id):
+        return self.rows("SELECT * FROM jobs WHERE track_id=? ORDER BY id", (track_id,))
+
+    def state_of(self, track_id):
+        from libwish.web.views import _decorate
+
+        with self.app.test_request_context("/"):
+            return _decorate([self.svc.tracks.get(track_id)], "artist")[0]
+
+    def test_dismissing_clears_the_failure_panel(self):
+        track_id = self.a_track()
+        self.fail_at(track_id)
+        self.assertIsNotNone(self.state_of(track_id).get("failure"))
+
+        response = self.client.post(f"/api/failure/{track_id}/dismiss")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["ok"])
+
+        self.assertIsNone(self.state_of(track_id).get("failure"))
+
+    def test_the_job_row_survives_with_dismissed_at_set(self):
+        track_id = self.a_track()
+        self.fail_at(track_id)
+        self.client.post(f"/api/failure/{track_id}/dismiss")
+
+        rows = self.jobs_for(track_id)
+        self.assertEqual(len(rows), 1, "dismissing must not delete the job row")
+        self.assertEqual(rows[0]["state"], "failed")
+        self.assertIsNotNone(rows[0]["dismissed_at"])
+
+    def test_a_later_failure_shows_again(self):
+        """The naive fix, tightened to fail: hiding failures for the track
+        rather than dismissing one job would leave the row silently clear
+        forever the second time too.
+        """
+        track_id = self.a_track()
+        self.fail_at(track_id, phase="match")
+        self.client.post(f"/api/failure/{track_id}/dismiss")
+        self.assertIsNone(self.state_of(track_id).get("failure"))
+
+        self.fail_at(track_id, phase="download")  # a fresh claim, broken again
+        after = self.state_of(track_id)
+        self.assertIsNotNone(after.get("failure"))
+        self.assertEqual(after["failure"]["phase"], "download")
+
+        rows = self.jobs_for(track_id)
+        self.assertEqual(len(rows), 2)
+        self.assertIsNotNone(rows[0]["dismissed_at"], "the old job stays dismissed")
+        self.assertIsNone(rows[1]["dismissed_at"], "the new one starts undismissed")
+
+    def test_a_running_job_is_never_hidden_by_this(self):
+        # The other half of the watch-for: the dismissed filter belongs to
+        # `broke` only. A claim in flight is not something to dismiss, and it
+        # must keep showing as working even with a dismissed failure sitting
+        # underneath it in the same track's job history.
+        track_id = self.a_track()
+        self.fail_at(track_id, phase="match")
+        self.client.post(f"/api/failure/{track_id}/dismiss")
+        self.fail_at(track_id, state="running", phase="download")
+
+        row = self.state_of(track_id)
+        self.assertEqual(row["state"], "working")
+        self.assertIsNone(row.get("failure"))
+
+    def test_dismissing_an_unknown_track_is_a_404(self):
+        response = self.client.post("/api/failure/999999/dismiss")
+        self.assertEqual(response.status_code, 404)
+
+    def test_a_double_dismiss_is_not_an_error(self):
+        track_id = self.a_track()
+        self.fail_at(track_id)
+        first = self.client.post(f"/api/failure/{track_id}/dismiss")
+        second = self.client.post(f"/api/failure/{track_id}/dismiss")
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        rows = self.jobs_for(track_id)
+        self.assertEqual(len(rows), 1, "a repeat dismiss must not touch an earlier job")
+        self.assertIsNotNone(rows[0]["dismissed_at"])
+
+
 class BuyAnchorExtensionMarker(Base):
     """`data-buy` is what the wishlist browser extension's click handler in
     libwish.js keys off to send a plain click at the store in the same tab
@@ -964,6 +1066,91 @@ class Purchases(Base):
         self.assertEqual(len(self.client.get("/api/purchases/qobuz?limit=2")
                              .get_json()["purchases"]), 2)
         self.assertEqual(self.client.get("/api/purchases/qobuz?limit=abc").status_code, 400)
+
+    def test_a_claimed_purchase_is_not_offered(self):
+        track_id = self.a_track("CHVRCHES", "Lies")
+        self.svc.tracks.mark_purchased(track_id, "qobuz", "a")
+        self.svc.stores = {"qobuz": PurchaseStore(inventory=[
+            self.owned_item("a", "Lies", "CHVRCHES"),
+            self.owned_item("b", "Falling Down", "Lil Peep"),
+        ])}
+        body = self.client.get("/api/purchases/qobuz").get_json()
+        self.assertEqual([p["item_key"] for p in body["purchases"]], ["b"])
+
+    def test_an_unclaimed_purchase_still_shows(self):
+        track_id = self.a_track("CHVRCHES", "Lies")
+        self.svc.tracks.mark_purchased(track_id, "qobuz", "a")
+        self.svc.stores = {"qobuz": PurchaseStore(inventory=[
+            self.owned_item("a", "Lies", "CHVRCHES"),
+            self.owned_item("b", "Falling Down", "Lil Peep"),
+        ])}
+        body = self.client.get("/api/purchases/qobuz").get_json()
+        self.assertIn("b", [p["item_key"] for p in body["purchases"]])
+
+    def test_the_hidden_count_and_reason_are_reported(self):
+        track_id = self.a_track("CHVRCHES", "Lies")
+        self.svc.tracks.mark_purchased(track_id, "qobuz", "a")
+        self.svc.stores = {"qobuz": PurchaseStore(inventory=[
+            self.owned_item("a", "Lies", "CHVRCHES"),
+            self.owned_item("b", "Falling Down", "Lil Peep"),
+        ])}
+        body = self.client.get("/api/purchases/qobuz").get_json()
+        self.assertEqual(body["hidden"], 1)
+        self.assertIn("hidden_reason", body)
+
+        # An untouched inventory reports the count honestly as zero, present
+        # rather than omitted, so a consumer never has to guess whether the
+        # key is missing because nothing was hidden or because the build is
+        # older than this field.
+        self.svc.stores = {"qobuz": PurchaseStore(inventory=[
+            self.owned_item("b", "Falling Down", "Lil Peep"),
+        ])}
+        clean = self.client.get("/api/purchases/qobuz").get_json()
+        self.assertEqual(clean["hidden"], 0)
+        self.assertNotIn("hidden_reason", clean)
+
+    def test_the_same_key_at_a_different_store_still_shows(self):
+        track_id = self.a_track("CHVRCHES", "Lies")
+        self.svc.tracks.mark_purchased(track_id, "qobuz", "a")
+        self.svc.stores = {"bandcamp": PurchaseStore("bandcamp", "Bandcamp", inventory=[
+            self.owned_item("a", "Lies", "CHVRCHES"),
+        ])}
+        body = self.client.get("/api/purchases/bandcamp").get_json()
+        self.assertEqual(body["hidden"], 0)
+        self.assertEqual([p["item_key"] for p in body["purchases"]], ["a"])
+
+    def test_a_purchase_with_no_recorded_key_still_shows(self):
+        """A purchase filed before `purchased_item_key` existed (or through any
+        path that never learned the key) has nothing to compare against, and
+        guessing off artist and title would risk hiding a purchase the reader
+        still needs: two different purchases of the same song are real. It
+        stays offered rather than being hidden on a guess.
+        """
+        track_id = self.a_track("CHVRCHES", "Lies")
+        self.svc.tracks.mark_purchased(track_id, "qobuz")  # no item_key
+        self.svc.stores = {"qobuz": PurchaseStore(inventory=[
+            self.owned_item("a", "Lies", "CHVRCHES"),
+        ])}
+        body = self.client.get("/api/purchases/qobuz").get_json()
+        self.assertEqual([p["item_key"] for p in body["purchases"]], ["a"])
+        self.assertEqual(body["hidden"], 0)
+
+    def test_a_purchase_restored_to_the_want_list_is_offered_again(self):
+        """Moving a track back to `queued` must not leave its old purchase
+        hidden, or the reader has no way to re-file it. `restore` never clears
+        `purchased_at`/`purchased_via`/`purchased_item_key`, so what makes the
+        purchase choosable again is the status leaving `('purchased','owned')`,
+        not the key being erased.
+        """
+        track_id = self.a_track("CHVRCHES", "Lies")
+        self.svc.tracks.mark_purchased(track_id, "qobuz", "a")
+        self.svc.tracks.set_status(track_id, "queued")
+        self.svc.stores = {"qobuz": PurchaseStore(inventory=[
+            self.owned_item("a", "Lies", "CHVRCHES"),
+        ])}
+        body = self.client.get("/api/purchases/qobuz").get_json()
+        self.assertEqual([p["item_key"] for p in body["purchases"]], ["a"])
+        self.assertEqual(body["hidden"], 0)
 
 
 class Pick(Base):

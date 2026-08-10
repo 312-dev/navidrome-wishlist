@@ -67,7 +67,17 @@ def _describe(ident) -> dict:
         out = {}
         for f in dataclasses.fields(ident):
             value = getattr(ident, f.name, None)
-            out[f.name] = list(value) if isinstance(value, (set, frozenset, tuple)) else value
+            if isinstance(value, (set, frozenset, tuple)):
+                out[f.name] = list(value)
+            elif dataclasses.is_dataclass(value):
+                # Recursed rather than left to json.dumps, whose `default=str`
+                # turns a nested identity into a Python repr. That repr then
+                # reads back out as the candidate's title, and the refusal
+                # panel showed a reader `NormalizedTitle(base='lies', ...)`
+                # where the name of the record they nearly bought should be.
+                out[f.name] = _describe(value)
+            else:
+                out[f.name] = value
         return out
     return {"repr": str(ident)[:500]}
 
@@ -201,7 +211,7 @@ class ClaimPipeline:
             self.svc.paths.discard(result.path)
             log.info("already in the library", context={"dest": str(dest)})
 
-        self.svc.tracks.mark_purchased(track["id"], store.id)
+        self.svc.tracks.mark_purchased(track["id"], store.id, item.item_key)
         self.svc.bus.publish("track.updated", id=track["id"], status="purchased",
                              store=store.id, path=str(dest))
         rescan(self.svc.settings.rescan_cmd)
@@ -231,7 +241,8 @@ class ClaimPipeline:
                 self._record(track["id"], want, candidates[index], score,
                              "accepted_after_confirmation",
                              match.explain(want, candidates[index], decision),
-                             len(candidates), store_id)
+                             len(candidates), store_id,
+                             gate_failed=decision.gate_failed, matched_via=decision.matched_via)
                 return decision, index
             # Confirmation is permission to accept a near miss, not permission to
             # download anything at all. Below the confirm floor there is no
@@ -239,7 +250,8 @@ class ClaimPipeline:
             self._record(track["id"], want, candidates[index] if index is not None else None,
                          score, "refused_despite_confirmation",
                          "confirmed by the user, but no candidate reaches the confirm floor",
-                         len(candidates), store_id)
+                         len(candidates), store_id,
+                         gate_failed=decision.gate_failed, matched_via=decision.matched_via)
             raise MatchRefused(
                 f"You confirmed this, but nothing in {store_id} comes close enough to be "
                 f"that track (best score {score}).", score=score, reason="below_confirm_floor")
@@ -247,10 +259,15 @@ class ClaimPipeline:
         try:
             decision, index = match.require_match(want, candidates)
         except MatchRefused as refusal:
+            # `str(refusal)` is `reader_message(...)`, the same sentence
+            # `require_match` raised, so the refusal panel and the exception a
+            # caller might log agree word for word. The short gate code that
+            # `reasons` used to carry instead now has its own column, so
+            # neither the human sentence nor the machine-readable gate is lost.
             self._record(track["id"], want, getattr(refusal, "candidate", None),
-                         getattr(refusal, "score", None), "refused",
-                         getattr(refusal, "reason", "") or str(refusal),
-                         len(candidates), store_id)
+                         getattr(refusal, "score", None), "refused", str(refusal),
+                         len(candidates), store_id,
+                         gate_failed=getattr(refusal, "reason", "") or None)
             raise
 
         # The confirm band exists to be confirmed. Reaching auto requires a
@@ -259,17 +276,19 @@ class ClaimPipeline:
         # the running program and not only of the design.
         if getattr(decision, "outcome", "") == "confirm":
             chosen = candidates[index] if index is not None else None
+            message = (match.reader_message(want, chosen, decision) if chosen
+                      else "Nothing in the account came close enough to be this track.")
             self._record(track["id"], want, chosen, decision.score, "needs_confirmation",
-                         match.explain(want, chosen, decision) if chosen else "",
-                         len(candidates), store_id)
-            raise MatchRefused(
-                match.explain(want, chosen, decision) if chosen else "no candidate",
-                score=decision.score, candidate=chosen, reason="needs_confirmation")
+                         message, len(candidates), store_id,
+                         gate_failed=decision.gate_failed, matched_via=decision.matched_via)
+            raise MatchRefused(message, score=decision.score, candidate=chosen,
+                               reason="needs_confirmation")
 
         chosen = candidates[index] if index is not None else None
         self._record(track["id"], want, chosen, getattr(decision, "score", None), "accepted",
                      match.explain(want, chosen, decision) if chosen else "",
-                     len(candidates), store_id)
+                     len(candidates), store_id,
+                     gate_failed=decision.gate_failed, matched_via=decision.matched_via)
         return decision, index
 
     def _user_confirmed(self, track_id: int) -> bool:
@@ -314,8 +333,16 @@ class ClaimPipeline:
         return payload.get("item_key") or None
 
     def _record(self, track_id: int, want, candidate, score, outcome: str,
-                reasons: str, considered: int, store_id: str | None) -> None:
+                reasons: str, considered: int, store_id: str | None, *,
+                gate_failed: str | None = None, matched_via: str = "") -> None:
         """Write the audit row for one matching decision.
+
+        `reasons` is prose now, not a code: the sentence the refusal panel
+        shows next to "Confidence {score} / {threshold}". `gate_failed` and
+        `matched_via` are what used to be folded into that same string for a
+        gate failure; they get their own columns so a refusal reads as a
+        sentence a person can act on without losing the machine-readable gate
+        an audit needs.
 
         Failure here is logged at error level rather than swallowed quietly. An
         audit that stops recording without saying so is worse than none, because
@@ -326,12 +353,12 @@ class ClaimPipeline:
         try:
             conn.execute(
                 "INSERT INTO match_decision(track_id, decided_at, phase, provider,"
-                " matcher_version, lexicon_hash, outcome, score, reasons, query_json,"
-                " candidate_json, candidates_considered, chosen_store_id)"
-                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " matcher_version, lexicon_hash, outcome, score, gate_failed, matched_via,"
+                " reasons, query_json, candidate_json, candidates_considered, chosen_store_id)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (track_id, int(time.time()), "claim", store_id,
                  getattr(match, "MATCHER_VERSION", "1"), identity.lexicon_hash(),
-                 outcome, score, reasons[:2000],
+                 outcome, score, gate_failed, matched_via, reasons[:2000],
                  json.dumps(_describe(want), default=str),
                  json.dumps(_describe(candidate), default=str) if candidate else None,
                  considered, store_id),

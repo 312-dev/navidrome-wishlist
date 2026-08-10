@@ -67,6 +67,7 @@ API = {
     "claim_confirm": "/api/claim/{id}/confirm",
     "claim_pick": "/api/claim/{id}/pick",
     "refusal_dismiss": "/api/refusal/{id}/dismiss",
+    "failure_dismiss": "/api/failure/{id}/dismiss",
     # No {id}: the picker appends the store itself, the same way a buy link
     # appends one to the shared `buy` route rather than the route templating
     # it in.
@@ -564,7 +565,12 @@ def _claim_jobs() -> tuple[dict[int, dict], dict[int, dict]]:
 
     Both survive a page reload on purpose. A claim that vanished from the screen
     when the browser refreshed would look like it had finished, and a failure
-    that vanished would look like nothing had ever been tried.
+    that vanished would look like nothing had ever been tried. That is what
+    ends it: `jobs.dismissed_at`, set by the failure panel's own dismiss
+    control, is what a reader who has read the failure and is not retrying it
+    presses. A dismissed job is skipped when building `broke`, never when
+    building `live`: a queued or running job is work actually happening, not
+    something anyone has said they are done reading.
     """
     jobs = _jobs()
     if jobs is None:
@@ -577,7 +583,7 @@ def _claim_jobs() -> tuple[dict[int, dict], dict[int, dict]]:
             continue
         if job.get("state") in ("queued", "running"):
             live.setdefault(track_id, job)
-        elif job.get("state") in ("failed", "interrupted"):
+        elif job.get("state") in ("failed", "interrupted") and job.get("dismissed_at") is None:
             broke.setdefault(track_id, job)
     return live, broke
 
@@ -622,6 +628,42 @@ def _payload(raw: str | None) -> dict:
     except ValueError:
         return {}
     return value if isinstance(value, dict) else {}
+
+
+def _plain(payload: dict, field: str) -> str:
+    """The reader-facing `field` out of a recorded identity, as plain text.
+
+    An identity carries both the string a store actually printed and the
+    normalised form the matcher compares, and only the first belongs on a
+    screen. `<field>_raw` is that string; the normalised sibling is a
+    structure whose stringified form is a Python repr, which is what a reader
+    once saw where the name of a record should have been. Anything that is not
+    already text is refused rather than coerced, because a repr shown to
+    someone deciding how to spend money is worse than a blank.
+    """
+    for key in (f"{field}_raw", field, f"track_{field}"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return ""
+
+
+def _prose(text: Any) -> str:
+    """`text` if it is a sentence for a reader, otherwise nothing.
+
+    The `reasons` column holds a written explanation now, but rows recorded
+    before it did hold a bare gate code, and those rows are still on disk. A
+    code reads as shouting where an explanation should be, so it is dropped
+    here and the panel falls back to naming the candidate plainly. Recognised
+    by shape rather than by a list: a gate code is upper case, underscored,
+    and has no spaces, which no sentence is.
+    """
+    value = (text or "").strip()
+    if not value:
+        return ""
+    if " " not in value and value.upper() == value and value.replace("_", "").isalpha():
+        return ""
+    return value
 
 
 def refusal_for(track_id: int, conn: Any = None) -> dict | None:
@@ -692,18 +734,18 @@ def refusal_for(track_id: int, conn: Any = None) -> dict | None:
         losers.append({
             "score": other.get("score"),
             "gate_failed": other.get("gate_failed"),
-            "title": payload.get("title") or payload.get("track_title") or "",
-            "artist": payload.get("artist") or "",
+            "title": _plain(payload, "title"),
+            "artist": _plain(payload, "artist"),
         })
     from ..models import MATCH_AUTO_MIN
 
     return {
         "score": row.get("score") or 0,
         "threshold": MATCH_AUTO_MIN,
-        "title": candidate.get("title") or candidate.get("track_title") or "",
-        "artist": candidate.get("artist") or "",
+        "title": _plain(candidate, "title"),
+        "artist": _plain(candidate, "artist"),
         "store": (row.get("provider") or "").upper(),
-        "reasons": row.get("reasons") or "",
+        "reasons": _prose(row.get("reasons")),
         "decided_at": row.get("decided_at"),
         "candidates": losers,
     }

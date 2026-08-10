@@ -299,12 +299,15 @@ def best_match(
 
 
 def explain(q: TrackIdentity, c: TrackIdentity | None, decision: MatchDecision) -> str:
-    """One line naming the evidence, for a person reading a refusal.
+    """One line naming the evidence, for the audit trail.
 
-    A refusal is shown to the user with the rejected candidate printed verbatim,
-    so this has to say which specific thing disagreed, not that matching failed.
-    `c` is None only for the two outcomes that are about the candidate list
-    rather than about one candidate.
+    This is diagnostic text: score thresholds, similarity ratios, gate names.
+    It goes into a log line or an enrichment `match_decision` row, read by
+    someone debugging the matcher, not by the person who was refused a
+    download. `reader_message`, below, is what that person sees; the two
+    exist separately so that fixing one wording never quietly changes the
+    other. `c` is None only for the two outcomes that are about the candidate
+    list rather than about one candidate.
     """
     mine = f"{q.artist_raw} - {q.title_raw}"
     gate = decision.gate_failed
@@ -359,6 +362,66 @@ def explain(q: TrackIdentity, c: TrackIdentity | None, decision: MatchDecision) 
     )
 
 
+def reader_message(q: TrackIdentity, c: TrackIdentity | None, decision: MatchDecision) -> str:
+    """The one sentence a person reads when a claim is refused.
+
+    Where `explain` names the evidence for someone debugging the matcher, this
+    names the situation for someone who just spent money and needs to know
+    what to do next: which candidate was closest, and specifically what was
+    wrong with it. No score, no ratio, no threshold; those already have their
+    own place in the refusal panel next to this sentence. The real artist and
+    title are named wherever that is the fact that matters, and always with
+    which side said what, because "the track you wanted" against "the closest
+    purchase" is the one distinction a refusal cannot afford to blur.
+    """
+    if decision.gate_failed == "NO_CANDIDATES" or c is None:
+        return "Nothing in the account came close enough to be this track."
+    if decision.gate_failed == "AMBIGUOUS_TOP_CANDIDATES":
+        return ("Two purchases in the account are equally close matches, so neither"
+                " was picked automatically.")
+    if decision.gate_failed == "EMPTY_FIELD":
+        return ("The track you wanted or the closest purchase has no artist or no"
+                " title to compare.")
+    if decision.gate_failed == "MBID_CONFLICT":
+        return "The closest purchase is tagged as a different recording than the track you wanted."
+    if decision.gate_failed == "ARTIST_MISMATCH":
+        return (
+            "The closest purchase we found is by a different artist than the track"
+            f" you wanted: you want {q.artist_raw!r}, and the closest purchase is"
+            f" credited to {c.artist_raw!r}."
+        )
+    if decision.gate_failed in ("TITLE_MISMATCH", "SHORT_TITLE_EXACT_ONLY"):
+        return (
+            "The closest purchase has a different title: you want"
+            f" {q.title_raw!r}, and the closest purchase is {c.title_raw!r}."
+        )
+    if decision.gate_failed == "VERSION_MISMATCH":
+        theirs_v = ", ".join(sorted(c.title.version)) or "no qualifier"
+        ours_v = ", ".join(sorted(q.title.version)) or "no qualifier"
+        return (
+            "The closest purchase is a different version of the track you wanted:"
+            f" {theirs_v} instead of {ours_v}."
+        )
+    if decision.gate_failed == "DURATION_MISMATCH":
+        theirs_s = (c.duration_ms or 0) / 1000
+        ours_s = (q.duration_ms or 0) / 1000
+        return (
+            f"The lengths do not match: the closest purchase runs {theirs_s:.0f}s,"
+            f" and the track you wanted runs {ours_s:.0f}s."
+        )
+    if decision.outcome == "confirm":
+        # Passed every gate, so nothing here is wrong the way the branches
+        # above are wrong; it is short of the auto threshold and wants a
+        # human nod rather than a reason to be turned away.
+        return (
+            f"The closest purchase, {c.artist_raw} - {c.title_raw}, looks right but did"
+            " not score high enough to download automatically."
+        )
+    # No gate failed and the outcome is still refused: every candidate was
+    # weighed and none of them, on the whole, was a strong enough match.
+    return "Nothing in the account came close enough to be this track."
+
+
 def require_match(
     q: TrackIdentity, candidates: Sequence[TrackIdentity]
 ) -> tuple[MatchDecision, int]:
@@ -366,12 +429,15 @@ def require_match(
 
     Claiming spends money and writes a file, so the caller of that path wants
     the refusal as control flow rather than as a value it might forget to check.
+    The exception carries `reader_message(...)` as its message, because that
+    message is what the refusal panel shows; `reason` stays the short gate
+    code, because that is what the audit trail records.
     """
     decision, index = best_match(q, candidates)
     if decision.outcome == "refused" or index is None:
         rejected = candidates[index] if index is not None else None
         raise MatchRefused(
-            explain(q, rejected, decision),
+            reader_message(q, rejected, decision),
             score=decision.score,
             candidate=rejected,
             reason=decision.gate_failed or "refused",
@@ -385,6 +451,7 @@ __all__ = [
     "artist_score",
     "best_match",
     "explain",
+    "reader_message",
     "require_match",
     "score",
     "title_gate",

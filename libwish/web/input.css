@@ -1062,12 +1062,16 @@
     white-space: pre-wrap;
     overflow-wrap: anywhere;
   }
+  /* Reads in the body colour, not the failure colour. This is the evidence
+     behind a refusal, not the refusal itself, and small red text on the dark
+     ground was the least legible thing in the panel while carrying the least
+     urgency. The failure colour stays on the stage line, where one use of it
+     means something. */
   .refusal__score {
-    font-size: var(--t-plate);
     font-weight: 600;
-    letter-spacing: 0.06em;
+    letter-spacing: 0.04em;
     font-variant-numeric: tabular-nums;
-    color: var(--flag);
+    color: var(--ink);
   }
   .refusal__actions {
     display: flex;
@@ -1075,10 +1079,23 @@
     gap: 8px;
     align-items: center;
   }
-  .refusal__log {
+  /* The sentence that says what went wrong. Reads at body size because it is
+     the content of this panel, not an annotation on it. */
+  .refusal__why {
+    font-size: var(--t-sub);
+    line-height: 1.5;
+    text-wrap: pretty;
+    max-width: 62ch;
+    margin: 0 0 6px;
+    color: var(--ink);
+  }
+  /* The evidence, beneath the sentence rather than inside it. Small because a
+     reader who wants the number will look for it, and one who does not should
+     not have to read past it to reach the actions. */
+  .refusal__meta {
     font-size: var(--t-micro);
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
+    line-height: 1.5;
+    margin: 0 0 10px;
     color: var(--fade);
   }
   .refusal__candidates {
@@ -1122,11 +1139,19 @@
     margin-top: 10px;
     font-size: var(--t-sub);
   }
+  /* The marker is drawn in the markup rather than by the browser, so it has
+     to be laid out as a row. Left as a plain block it becomes a line of its
+     own above the label, which reads as two controls instead of one. */
   .refusal__picker summary {
+    display: flex;
+    align-items: center;
+    gap: 6px;
     cursor: pointer;
     color: var(--fade);
     list-style: none;
   }
+  .refusal__picker summary:hover { color: var(--ink); }
+  .refusal__picker summary svg { flex: 0 0 auto; }
   .refusal__picker summary::-webkit-details-marker {
     display: none;
   }
@@ -1196,12 +1221,19 @@
     text-wrap: pretty;
     max-width: 62ch;
   }
+  /* A row, so the warning mark sits beside the words it belongs to. An inline
+     SVG in a block container takes a line to itself and reads as a stray
+     graphic above an unrelated label. */
   .failure__stage {
+    display: flex;
+    align-items: center;
+    gap: 6px;
     font-size: var(--t-micro);
     letter-spacing: 0.1em;
     text-transform: uppercase;
     color: var(--flag);
   }
+  .failure__stage svg { flex: 0 0 auto; }
   .failure__actions {
     display: flex;
     gap: 8px;

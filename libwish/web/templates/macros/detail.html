@@ -56,9 +56,13 @@
 
     * "Nothing was downloaded" comes first, before any explanation. Whether
       bytes landed is the only thing the user needs in the first second.
-    * The rejected candidate is printed verbatim and wrapped rather than
-      truncated. Reading the string is the diagnosis; an ellipsis hides it.
-    * Score and threshold are both shown. "Low confidence" teaches nothing.
+    * One sentence says what was wrong, in words, naming which side is the
+      track wanted and which is the purchase found. It is recorded at the
+      moment of the decision rather than composed here, so the panel and the
+      banner on the store's page cannot drift into telling different stories.
+    * Score and threshold are both shown, beneath that sentence and not
+      inside it. "Low confidence" teaches nothing, and a number in the middle
+      of a sentence is what made this panel read as a debugger's output.
     * The override is worded as a claim the user is making, is never the primary
       action, is never the default focus target, and arms before it fires.
 
@@ -78,16 +82,23 @@
   <p class="refusal__head" id="refused-{{ t.id }}">Nothing was downloaded.</p>
 
   <div class="refusal__body">
-    {%- if r.title -%}
-    The closest purchase in your {{ r.store|title or 'store' }} account was:
-    <code class="refusal__candidate">{{ r.title }}{% if r.artist %}
-{{ r.artist }}{% endif %}</code>
+    {#- The recorded sentence leads, because it is the only line here that
+        says what actually went wrong. It already names the candidate, so the
+        candidate is not restated above it; two descriptions of one purchase,
+        one of them a bare string in a code block, was the noise this panel
+        used to open with. Older rows predate that sentence and fall back to
+        naming the candidate plainly. -#}
+    {%- if r.reasons -%}
+    <p class="refusal__why">{{ r.reasons }}</p>
+    {%- elif r.title -%}
+    <p class="refusal__why">The closest purchase in your {{ r.store|title or 'store' }}
+      account was {{ r.title }}{% if r.artist %} by {{ r.artist }}{% endif %}.</p>
     {%- else -%}
-    No purchase in your {{ r.store|title or 'store' }} account scored high enough to be
-    this track.
+    <p class="refusal__why">Nothing in your {{ r.store|title or 'store' }} account was
+      close enough to be this track.</p>
     {%- endif -%}
-    <p>Confidence <span class="refusal__score">{{ r.score }} / {{ r.threshold }}</span>,
-      and a claim needs {{ r.threshold }}. This track is still on your want list.</p>
+    <p class="refusal__meta">Confidence <span class="refusal__score">{{ r.score }} /
+      {{ r.threshold }}</span>. This track is still on your want list.</p>
   </div>
 
   <div class="refusal__actions">
@@ -113,9 +124,6 @@
       Confirm, download it
     </button>
 
-    <span class="refusal__log">
-      {%- if r.reasons %}{{ r.reasons }}{% endif -%}
-    </span>
   </div>
 
   {#- The hand-picker. Closed by default (no `open` attribute), so it costs
@@ -124,7 +132,7 @@
       value the actions above send back on a retry. -#}
   <details class="refusal__picker"
       x-data="{
-        loading: false, error: '', purchases: null, selected: null, sending: false,
+        loading: false, error: '', purchases: null, selected: null, sending: false, hidden: 0,
         load() {
           if (this.purchases !== null || this.loading) return;
           this.loading = true; this.error = '';
@@ -141,6 +149,7 @@
                 return;
               }
               this.purchases = answer.body.purchases || [];
+              this.hidden = answer.body.hidden || 0;
             }.bind(this))
             .catch(function () {
               this.loading = false;
@@ -179,9 +188,15 @@
     <div class="refusal__picker-body">
       <p class="refusal__picker-note" x-show="loading" x-cloak>Looking through your purchases.</p>
       <p class="refusal__picker-note" x-show="error" x-cloak x-text="error"></p>
-      <p class="refusal__picker-note" x-show="purchases && purchases.length === 0" x-cloak>
+      <p class="refusal__picker-note" x-show="purchases && purchases.length === 0 && hidden === 0" x-cloak>
         No purchases came back from {{ r.store|title or 'the store' }} just now.
       </p>
+      {#- Named rather than dropped: a list that quietly shrinks reads as "the
+          shop lost my purchase", the same failure the confirm-batch cap avoids
+          by naming itself instead of just returning fewer rows. -#}
+      <p class="refusal__picker-note" x-show="hidden > 0" x-cloak
+         x-text="hidden + (hidden === 1 ? ' purchase you already filed is hidden.'
+                                         : ' purchases you already filed are hidden.')"></p>
       <ul class="refusal__picker-list" x-show="purchases && purchases.length" x-cloak>
         <template x-for="p in (purchases || [])" :key="p.item_key">
           <li>
@@ -258,6 +273,13 @@
     {%- if f.link %}
     <a class="btn" data-variant="ghost" data-size="sm" href="{{ f.link }}">{{ f.link_label }}</a>
     {%- endif %}
+    {#- Not a retry: this acknowledges the job that broke and returns the row
+        to plain wanted without touching a store. A later claim that fails
+        again writes its own job and shows this panel again. -#}
+    <button type="button" class="btn" data-variant="ghost" data-size="sm"
+            hx-post="{{ API.failure_dismiss.format(id=t.id) }}" hx-swap="none">
+      Not now, clear this
+    </button>
   </div>
 </div>
 {%- endmacro -%}

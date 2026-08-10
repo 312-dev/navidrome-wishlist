@@ -559,6 +559,8 @@ without apologising and without being vague:
 | 4 | Download stopped at 8.1 of 12.4 MB. | `Retry` |
 | 5 | The downloaded file is not FLAC. Nothing was added to your library. | `Retry`, `Report` |
 
+Every stage also carries `Not now, clear this`, alongside `Retry`: a session that will not come back without a re-seed, or a store that keeps refusing the same purchase, is a failure retrying cannot fix, and it should not have to sit on the row forever. It marks the broken job acknowledged, not the track immune; a later claim that fails writes its own job and shows the panel again.
+
 ### Refusal
 
 The most important state in the application, and the reason it exists as a designed screen
