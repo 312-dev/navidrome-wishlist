@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% import "macros/row.html" as r %}
+
+{% block title %}Owned &middot; Library Wishlist{% endblock %}
+
+{% block content %}
+{% if total == 0 %}
+  <div class="empty">
+    <p class="empty__head">Owned</p>
+    <p class="empty__body">Nothing claimed yet. Buy something, claim it here, and the file lands
+      in your library with its quality stamped on it.</p>
+  </div>
+{% else %}
+  {# The payoff view. Same rows, same plate, except the plate now reports what
+     actually landed on disk rather than what a shop was willing to say. #}
+  {# Grouped by date here, and the date means something: it is when the file
+     landed, one purchase at a time, rather than when an import ran. #}
+  <ul class="rack" id="rack" role="list" data-view="owned" data-group="date">
+    {% for g in groups %}
+      {{ r.group_head(g) }}
+      {% for t in g.tracks %}{{ r.row(t, 'owned') }}{% endfor %}
+    {% endfor %}
+  </ul>
+{% endif %}
+{% endblock %}

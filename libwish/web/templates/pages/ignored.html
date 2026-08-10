@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% import "macros/row.html" as r %}
+
+{% block title %}Ignored &middot; Library Wishlist{% endblock %}
+
+{% block content %}
+{% if not tracks %}
+  <div class="empty">
+    <p class="empty__head">Ignored</p>
+    <p class="empty__body">Nothing ignored. Tracks you dismiss from the want list wait here, and
+      restoring one puts it straight back.</p>
+  </div>
+{% else %}
+  <ul class="rack" id="rack" role="list" data-view="ignored">
+    {% for t in tracks %}{{ r.ignored_row(t) }}{% endfor %}
+  </ul>
+{% endif %}
+{% endblock %}

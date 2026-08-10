@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Offline · Library Wishlist</title>
+<link rel="icon" href="/static/icons/favicon.svg" type="image/svg+xml">
+<!-- Styled inline rather than against app.css. The stylesheet is cached under a
+     build-digest URL, and a page that asked for the bare path would miss that
+     cache and render unstyled at the one moment it exists to be read. -->
+<style>
+  /* Declared here as well as in app.css. This page is read with the server
+     unreachable, and the file it points at is one the worker precaches, so
+     naming the face is what stops the one page nobody can reload from being
+     the only one set in Helvetica. */
+  @font-face {
+    font-family: Archivo;
+    font-style: normal;
+    font-weight: 100 900;
+    font-stretch: 62.5% 125%;
+    font-display: swap;
+    src: url('/static/fonts/archivo-var-latin.woff2') format('woff2');
+  }
+
+  :root {
+    color-scheme: light;
+    --stock: #e7e8e2;
+    --sleeve: #f7f7f3;
+    --ink: #1e2226;
+    --fade: #6a7078;
+    --rule: rgba(106, 112, 120, 0.38);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --stock: #15181b;
+      --sleeve: #1d2125;
+      --ink: #e9eae4;
+      --fade: #98a0a8;
+      --rule: rgba(152, 160, 168, 0.38);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+    background: var(--stock);
+    color: var(--ink);
+    font-family: Archivo, 'Helvetica Neue', Arial, sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  main { max-width: 46ch; }
+  h1 {
+    display: inline-block;
+    margin: 0 0 20px;
+    padding: 10px 12px;
+    border: 1px solid var(--rule);
+    border-radius: 2px;
+    font-size: 22px;
+    font-weight: 700;
+    line-height: 1;
+    letter-spacing: -0.015em;
+    text-transform: uppercase;
+  }
+  p { margin: 0 0 12px; }
+  .sub { color: var(--fade); }
+  a {
+    display: inline-block;
+    margin-top: 8px;
+    padding: 8px 14px;
+    border: 1px solid var(--rule);
+    border-radius: 2px;
+    color: inherit;
+    text-decoration: none;
+  }
+  a:hover { background: var(--sleeve); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Library Wishlist</h1>
+  <p>This device cannot reach the server right now.</p>
+  <p class="sub">
+    The list lives on the server, so there is nothing to show until the
+    connection is back. Nothing was lost: no claim runs from this page.
+  </p>
+  <a href="/">Try again</a>
+</main>
+</body>
+</html>

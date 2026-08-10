@@ -1,0 +1,14 @@
+services:
+  wishlist:
+    build: .
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    volumes:
+      - wishlist-data:/data
+      - ${MUSIC_LIBRARY_DIR:-./music}:/music
+    restart: unless-stopped
+
+volumes:
+  wishlist-data:

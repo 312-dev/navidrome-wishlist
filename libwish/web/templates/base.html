@@ -1,0 +1,118 @@
+{% import "macros/icons.html" as ic %}<!doctype html>
+<html lang="en" data-theme="{{ theme|default('system') }}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>{% block title %}Library Wishlist{% endblock %}</title>
+
+{#- Installable. The manifest and the worker are both served from the root
+    because a worker only controls the path it was served from and below.
+
+    Two theme colours rather than one: the manifest can carry a single value,
+    but the browser chrome sits directly above the page, and one colour there
+    means the surround disagrees with the ground in whichever theme it was not
+    chosen for. -#}
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#e7e8e2" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#15181b" media="(prefers-color-scheme: dark)">
+<link rel="icon" href="/static/icons/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/static/icons/favicon-32.png" sizes="32x32" type="image/png">
+<link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
+
+{#- Applied before first paint so a stored choice never flashes the other
+    theme. It sets an attribute and touches no geometry, so nothing shifts. -#}
+<script>
+  try {
+    var t = localStorage.getItem('lw-theme');
+    if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+    else document.documentElement.removeAttribute('data-theme');
+  } catch (e) {}
+</script>
+
+{#- The one face the page uses. It is served from this image: the app is
+    expected to run on a LAN that may have no route out, and a page that waits
+    on a font CDN there renders in Arial. -#}
+{#- Preloaded without the cache-busting query, because the stylesheet asks for
+    the bare path and a preload only counts when the URL matches exactly. With
+    the query on one side the browser fetches each face twice and warns that
+    the preload went unused. -#}
+<link rel="preload" as="font" type="font/woff2" crossorigin
+      href="/static/fonts/archivo-var-latin.woff2">
+<link rel="stylesheet" href="{{ asset('css/app.css') }}">
+
+<script src="{{ asset('js/htmx.min.js') }}" defer></script>
+<script src="{{ asset('js/alpine.min.js') }}" defer></script>
+<script src="{{ asset('js/libwish.js') }}" defer></script>
+</head>
+
+<body hx-headers='{"X-Requested-With": "libwish"}' data-events="{{ API.events }}">
+
+<a class="skip-link" href="#main">Skip to the list</a>
+
+{#- One polite region for the whole page. Announcing every arriving row from
+    the list itself would read a hundred and sixty items aloud; short sentences
+    written here say what changed and stop. -#}
+<div id="announcer" class="sr-only-live" role="status" aria-live="polite" aria-atomic="true"></div>
+
+<header class="shell">
+  {#- Just the mark. The three counts belong to the tabs below, which carry
+      them beside the view each one describes; saying them again here says
+      nothing the eye does not already have. -#}
+  <div class="masthead">
+    <h1 class="masthead__mark">Library Wishlist</h1>
+  </div>
+</header>
+
+{#- Both banners are persistent and both name the consequence rather than the
+    fault. Neither is a toast: a toast is gone before the sentence is read. -#}
+<div class="shell">
+  <div class="banner" id="banner-offline" role="status" hidden>
+    {{ ic.icon('alert', 16, 2) }}
+    <span>Live updates disconnected. Retrying in
+      <span class="banner__count" id="retry-count">8</span>s.</span>
+    <button type="button" class="btn" data-variant="outline" data-size="sm" id="retry-now">
+      Retry now
+    </button>
+  </div>
+  <div class="banner banner--warn" id="banner-credential" role="status" hidden>
+    {{ ic.icon('alert', 16, 2) }}
+    <span id="credential-text"></span>
+    <a class="btn" data-variant="outline" data-size="sm" href="/setup">Reconnect</a>
+  </div>
+</div>
+
+<div class="shell">
+  <nav class="bar" aria-label="Views">
+    <ul class="bar__tabs">
+      <li><a class="tab" href="/" {% if view == 'wanted' %}aria-current="page"{% endif %}>
+        Wanted <span class="tab__count" data-count="wanted">{{ counts.wanted|default(0) }}</span></a></li>
+      <li><a class="tab" href="/owned" {% if view == 'owned' %}aria-current="page"{% endif %}>
+        Owned <span class="tab__count" data-count="owned">{{ counts.owned|default(0) }}</span></a></li>
+      <li><a class="tab" href="/ignored" {% if view == 'ignored' %}aria-current="page"{% endif %}>
+        Ignored <span class="tab__count" data-count="ignored">{{ counts.ignored|default(0) }}</span></a></li>
+    </ul>
+    <div class="bar__controls">
+      {% block controls %}{% endblock %}
+      <button type="button" class="btn" data-variant="ghost" data-size="sm" id="theme-toggle"
+              aria-label="Change theme">Theme</button>
+    </div>
+  </nav>
+
+  <main id="main">
+    {% block content %}{% endblock %}
+  </main>
+</div>
+
+{#- One element for the whole page. A per-row player would leave four of them
+    holding a decoded stream after the fifth started. -#}
+<audio id="preview-audio" preload="none"></audio>
+
+{#- The five claim stages, shipped as data rather than restated in JavaScript.
+    The plate prints "3 OF 5" live, and the denominator has to keep matching
+    CLAIM_PHASES in libwish/jobs.py; one copy, rendered from the server, is how
+    that stays true. -#}
+<script type="application/json" id="claim-stages">{{ claim_stages_json|safe }}</script>
+
+</body>
+</html>

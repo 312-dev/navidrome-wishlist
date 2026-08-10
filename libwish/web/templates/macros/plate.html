@@ -1,0 +1,74 @@
+{% import "macros/icons.html" as ic %}
+
+{#
+  The provenance plate.
+
+  One rectangle, five states, one macro. The user learns a single object rather
+  than five badges, and because every view calls this macro the wanted list, the
+  owned list and the mobile strip physically cannot drift apart.
+
+  The quality ladder renders on owned rows only. Before a purchase there is no
+  honest number to print: Qobuz will not answer a format query without an
+  application id, and Bandcamp decides the format at download time. An outlined
+  ladder showing a guess would look exactly like a ladder showing a fact, which
+  is the one thing this object must never do.
+#}
+
+{%- macro plate(p, id=None) -%}
+{%- if p.state == 'wanted' -%}
+{#- Wanted is the default state of the whole list, and a badge on every row
+    saying so tells the reader what the tab above already told them. It sits
+    beside a button that says "Buy at", which is the same fact again.
+
+    The element stays, empty and hidden. It is the anchor the live connection
+    swaps against and the thing it reads the previous state from, so a row
+    whose claim starts has somewhere to put a plate, and it appears in a column
+    that was already holding the space for it. -#}
+<div class="plate is-wanted" {% if id %}id="plate-{{ id }}"{% endif %}
+     data-state="wanted" hidden></div>
+{%- else -%}
+<div class="plate is-{{ p.state|replace('_','-') }}"
+     {% if id %}id="plate-{{ id }}"{% endif %}
+     data-state="{{ p.state }}"
+     {% if p.state == 'working' %}role="progressbar" aria-valuemin="1"
+       aria-valuemax="{{ p.of }}" aria-valuenow="{{ p.step }}"
+       aria-valuetext="{{ p.l1|lower }}, step {{ p.step }} of {{ p.of }}"{% endif %}>
+
+  <div class="plate__line">
+    <span>{{ p.l1 }}</span>
+    {%- if p.l1r %}<span>{{ p.l1r }}</span>{% endif -%}
+  </div>
+
+  {%- if p.l2 or p.l2r %}
+  <div class="plate__line">
+    <span>{{ p.l2 }}{% if p.l2_icon %} {{ ic.icon(p.l2_icon, 10, 2, 'inline') }}{% endif %}</span>
+    {%- if p.l2r %}<span>{{ p.l2r }}</span>{% endif -%}
+  </div>
+  {%- endif %}
+
+  {%- if p.tier %}
+  {# Four segments against a real tier ladder: lossy, CD, hi-res, and above.
+     Filled rather than outlined, because after the purchase this is a fact. #}
+  <div class="ladder" role="img"
+       aria-label="{{ p.tier.segments }} of 4 on the quality ladder, {{ p.tier.label }}">
+    {%- for i in range(4) %}
+    <span class="ladder__seg {% if i < p.tier.segments %}is-filled{% endif %}"></span>
+    {%- endfor %}
+    {%- if p.mark %}<span class="ladder__mark">{{ p.mark }}</span>{% endif %}
+  </div>
+  {%- elif p.mark %}
+  <div class="ladder"><span class="ladder__mark">{{ p.mark }}</span></div>
+  {%- endif %}
+
+  {%- if p.step %}
+  {# Five steps, not four. The tier ladder is a different object with a
+     different meaning and is deliberately not reused as a progress bar. #}
+  <div class="plate__steps">
+    {%- for i in range(1, p.of + 1) %}
+    <span class="plate__step {% if i <= p.step %}is-done{% endif %}"></span>
+    {%- endfor %}
+  </div>
+  {%- endif %}
+</div>
+{%- endif -%}
+{%- endmacro -%}

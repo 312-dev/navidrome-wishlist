@@ -1,0 +1,33 @@
+[project]
+name = "library-wishlist"
+version = "1.0.0"
+description = "Self-hosted queue of loved tracks from Last.fm and ListenBrainz, with buy links and purchase-verified downloads."
+requires-python = ">=3.10"
+# Three dependencies, all of them serving the web layer. Everything else
+# (HTTP, identity, matching, storage, scheduling) is standard library, which is
+# what keeps the container small and the supply chain short for an application
+# that holds live store credentials.
+dependencies = [
+    "flask>=3.0,<4",
+    "jinja2>=3.1,<4",
+    "waitress>=3.0,<4",
+]
+
+[project.scripts]
+libwish = "libwish.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+# cookie_broker sits beside the package rather than inside it because it is
+# the receiver a browser extension posts to, and it is useful on its own to
+# anything else that has to hold a logged-in session without a browser.
+py-modules = ["cookie_broker"]
+
+[tool.setuptools.packages.find]
+include = ["libwish*"]
+
+[tool.setuptools.package-data]
+libwish = ["migrations/*.sql", "web/templates/*.html", "web/templates/**/*.html", "web/static/**/*"]

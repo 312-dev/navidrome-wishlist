@@ -1,0 +1,12 @@
+.env
+.env.*
+!.env.example
+__pycache__/
+*.pyc
+.venv/
+*.db
+.testdata/
+
+# Build-time toolchain, downloaded on demand and never shipped.
+tools/vendor/.cache/
+tools/vendor/tailwindcss-*

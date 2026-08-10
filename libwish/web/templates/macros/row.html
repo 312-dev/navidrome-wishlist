@@ -1,0 +1,217 @@
+{% import "macros/icons.html" as ic %}
+{% import "macros/plate.html" as pl %}
+{% import "macros/detail.html" as dt %}
+
+{#
+  One rack row.
+
+  Flat on a single surface, divided from its neighbours by a hairline. Hover
+  changes the background and nothing else moves, because a row that grows or
+  lifts under the pointer relocates every row beneath it.
+
+  There is one primary action per row and it is marked `data-primary`, which is
+  what Enter on a focused row activates. The refusal override is deliberately
+  not marked, so it cannot be reached by pressing Enter on the row.
+#}
+
+{%- macro row(t, view='wanted') -%}
+<li class="row{% if view == 'wanted' and t.selectable %} row--pickable{% endif %}" id="row-{{ t.id }}"
+    role="listitem" tabindex="-1"
+    data-track="{{ t.id }}" data-state="{{ t.state }}"
+    data-group-key="{{ t.group_key }}"
+    data-search="{{ (t.title ~ ' ' ~ t.artist)|lower }}"
+    x-data="{ opened: false, store: '{{ t.store_id }}' }">
+
+  {# The selection column exists on every row of every view so the covers below
+     it stay in one line, both down a list and across the tabs. It holds a
+     checkbox only where a bulk claim could actually run: a row nothing sells
+     has nowhere to claim from, a row already claiming is going, and an owned
+     row is finished. A checkbox on any of those is an offer the confirm button
+     cannot honour.
+
+     The checkbox carries every store the row can be bought at, because that is
+     what the bulk bar groups a selection by. It used to carry the one store the
+     row had been assigned to, which for almost every row is none. #}
+  {%- if view == 'wanted' and t.selectable %}
+  {# The checkbox sits inside its label rather than being pointed at by one, so
+     the whole cell is the hit area: 40px tall beside a 40px button on the
+     desktop grid, 44 square on touch. #}
+  <label class="row__pick">
+    <input type="checkbox" class="pick" id="pick-{{ t.id }}" data-pick="{{ t.id }}"
+           data-stores="{{ t.stores|map(attribute='id')|join(',') }}"
+           aria-label="Select {{ t.title }} by {{ t.artist }}">
+  </label>
+  {%- else %}
+  <div class="row__pick"></div>
+  {%- endif %}
+
+  <div class="row__cover">
+    {#- Cover art comes from this server off a local cache. The URL the source
+        metadata carries points at the streaming service's CDN, and rendering
+        it would tell that host the reader's address and roughly what is on
+        their want list once per row per page load, as well as leaving the
+        whole grid blank on a LAN with no route out.
+
+        Caching runs behind the list, so early on most of these answer 404.
+        The mark drawn under the image is what a row without art is supposed
+        to look like, and the box is a fixed size either way, so nothing on
+        the page moves when one arrives or fails to. -#}
+    <img class="cover" src="{{ t.cover_src }}" alt="" data-cover
+         width="64" height="64" loading="lazy" decoding="async">
+    {%- if view != 'owned' %}
+    <button type="button" class="preview" aria-pressed="false"
+            data-preview="{{ t.id }}"
+            aria-label="Preview {{ t.title }} by {{ t.artist }}">
+      {{ ic.icon('play', 20, 2, 'icon-play') }}
+      {{ ic.icon('pause', 20, 2, 'icon-pause') }}
+    </button>
+    {%- endif %}
+  </div>
+
+  <div class="row__meta">
+    <div class="row__title" title="{{ t.title }}">{{ t.title }}</div>
+    <div class="row__artist" title="{{ t.artist }}">{{ t.artist }}</div>
+    {%- if view == 'owned' %}
+      <div class="row__origin">bought {{ t.plate.l2r }}{% if t.plate.l2 %} via {{ t.plate.l2|title }}{% endif %}</div>
+    {%- elif t.origin or t.duration or t.duration_unknown %}
+      {# "runs" is doing real work: a bare 4:12 next to a track name reads as a
+         clock time or a queue position as readily as a length, which is the
+         confusion that made the loved-at timestamp unreadable.
+
+         Where the runtime would be, a track whose metadata lookup was
+         inconclusive says so. It takes the space the number would have taken
+         and none of its own, and it belongs here rather than in a panel: it is
+         a missing fact about the track, not a refusal about a purchase. #}
+      <div class="row__origin">
+        {{- t.origin -}}
+        {%- if t.origin and (t.duration or t.duration_unknown) %} &middot; {% endif -%}
+        {%- if t.duration %}runs {{ t.duration }}
+        {%- elif t.duration_unknown %}<span class="row__gap"
+          title="No metadata lookup matched this track, so nothing recorded how long it runs. A claim cannot check a candidate's length against it.">no runtime</span>
+        {%- endif -%}
+      </div>
+    {%- endif %}
+    {%- if t.quality_note %}
+    {# Promised versus delivered, stated plainly. No other music software tells
+       you when the file is a step below the listing. #}
+    <div class="row__note">{{ t.quality_note }}</div>
+    {%- endif %}
+  </div>
+
+  <div class="row__plate">{{ pl.plate(t.plate, id=t.id) }}</div>
+
+  <div class="row__actions">
+    {%- if view == 'owned' %}
+      {%- if t.file_path %}
+      <span class="row__path" title="{{ t.file_path }}">{{ t.file_path }}</span>
+      {%- endif %}
+
+    {%- elif t.state == 'working' %}
+      <button type="button" class="btn" data-variant="outline" data-size="sm"
+              hx-post="{{ API.cancel.format(id=t.id) }}" hx-swap="none">Cancel</button>
+
+    {%- elif t.state == 'refused' %}
+      <button type="button" class="btn" data-variant="outline" data-primary data-act="claim"
+              hx-post="{{ API.claim.format(id=t.id) }}" hx-swap="none">
+        {{ ic.icon('refresh', 15, 2) }} Retry
+      </button>
+
+    {%- elif t.state == 'no_store' %}
+      {# Where to look is the store layer's call, not this template's. Sending
+         the browser straight to a search engine would hard-code one, and would
+         be the only outbound host on a page that otherwise fetches nothing. #}
+      <a class="btn" data-variant="outline" data-primary target="_blank" rel="noopener"
+         href="{{ API.search.format(id=t.id) }}">
+        Search {{ ic.icon('arrow-up-right', 15, 2) }}
+      </a>
+
+    {%- else %}
+      {# Buy opens the shop in a new tab and the actions change to "I bought
+         it". No spinner: nothing is being awaited on the server, and a spinner
+         that spins forever teaches the user to distrust every other one.
+
+         Whichever store was opened is remembered on the row, because the claim
+         that follows has to look in the shop the purchase was actually made
+         in. A claim that names no store is refused outright wherever more than
+         one is configured, which is what made "I bought it" fail on every row
+         of a two-store install. #}
+      {%- if t.stores|length == 1 %}
+      <a class="btn" data-primary x-show="!opened" target="_blank" rel="noopener"
+         href="{{ API.buy.format(id=t.id) }}?store={{ t.stores[0].id }}"
+         @click="opened = true">
+        Buy at {{ t.stores[0].name }} {{ ic.icon('arrow-up-right', 15, 2) }}
+      </a>
+      {%- else %}
+      {# A menu rather than a guess. Two shops sell most of this list, at
+         different prices and in different formats, and choosing one on the
+         reader's behalf is exactly the kind of decision this app exists not to
+         make for them. #}
+      <div class="menu" x-show="!opened" x-data="{ open: false }"
+           @keydown.escape.window="open = false" @click.outside="open = false">
+        <button type="button" class="btn" data-primary
+                :aria-expanded="open ? 'true' : 'false'" aria-haspopup="true"
+                @click="open = !open">
+          Buy at {{ ic.icon('down', 15, 2) }}
+        </button>
+        <div class="menu__list" x-show="open" x-cloak role="menu"
+             aria-label="Where to buy {{ t.title }}">
+          {%- for s in t.stores %}
+          <a class="menu__item" role="menuitem" target="_blank" rel="noopener"
+             href="{{ API.buy.format(id=t.id) }}?store={{ s.id }}"
+             @click="open = false; store = '{{ s.id }}'; opened = true">
+            {{ s.name }} {{ ic.icon('arrow-up-right', 14, 2) }}
+          </a>
+          {%- endfor %}
+        </div>
+      </div>
+      {%- endif %}
+      <button type="button" class="btn" data-primary data-act="claim" x-show="opened" x-cloak
+              hx-post="{{ API.claim.format(id=t.id) }}" hx-swap="none"
+              :hx-vals="JSON.stringify({ store: store })">I bought it</button>
+      <button type="button" class="btn" data-variant="ghost" data-size="sm"
+              x-show="opened" x-cloak @click="opened = false">Cancel</button>
+    {%- endif %}
+
+    {%- if view != 'owned' %}
+    <button type="button" class="ignore" title="Move to ignored"
+            aria-label="Ignore {{ t.title }} by {{ t.artist }}"
+            data-act="ignore"
+            hx-post="{{ API.ignore.format(id=t.id) }}" hx-swap="none">
+      {{ ic.icon('x', 16, 2) }}
+    </button>
+    {%- endif %}
+  </div>
+
+  <div class="row__detail" id="detail-{{ t.id }}">{{ dt.detail(t) }}</div>
+</li>
+{%- endmacro -%}
+
+
+{#- One sticky group header. Shared by the first page, every later page and the
+    owned view, so a header cut by the server and one appended by the browser
+    cannot drift apart. `n` is the size of the whole group, not of the part
+    loaded so far, so a header never contradicts itself when more rows arrive
+    underneath it. -#}
+{%- macro group_head(g) -%}
+<li class="group-head" role="presentation" data-group="{{ g.key }}">
+  <span>{{ g.key }}</span>
+  <span class="group-head__count" data-group-count>{{ g.n }}</span>
+  <span class="group-head__rule"></span>
+</li>
+{%- endmacro -%}
+
+
+{#- One ignored track. Smaller, quieter, and restorable in one click. -#}
+{%- macro ignored_row(t) -%}
+<li class="irow" id="row-{{ t.id }}" role="listitem" data-track="{{ t.id }}">
+  <div class="irow__cover">
+    <img class="cover" src="{{ t.cover_src }}" alt="" data-cover
+         width="40" height="40" loading="lazy" decoding="async">
+  </div>
+  <div class="irow__meta"><b>{{ t.title }}</b> <span>{{ t.artist }}</span></div>
+  <button type="button" class="btn" data-variant="outline" data-size="sm"
+          hx-post="{{ API.restore.format(id=t.id) }}" hx-swap="none">
+    {{ ic.icon('undo', 14, 2) }} Restore
+  </button>
+</li>
+{%- endmacro -%}

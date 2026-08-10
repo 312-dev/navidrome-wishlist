@@ -1,0 +1,20 @@
+{#
+  Static blocks while a scan runs. No shimmer: a sweep across a dozen rows is
+  close to worst case for visual snow, and it says nothing a still block does
+  not already say.
+#}
+<div class="rack htmx-indicator" id="rack-skeleton" aria-hidden="true">
+  {% for _ in range(6) %}
+  <div class="skel">
+    {# Stands in for the row's selection column. Nothing is drawn in it; it is
+       here so the cover below starts where the real one will. #}
+    <div></div>
+    <div class="skel__block skel__cover"></div>
+    <div>
+      <div class="skel__block skel__line" style="width:42%"></div>
+      <div class="skel__block skel__line" style="width:26%"></div>
+    </div>
+    <div class="skel__block skel__plate"></div>
+  </div>
+  {% endfor %}
+</div>

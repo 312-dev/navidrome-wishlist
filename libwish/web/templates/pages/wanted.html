@@ -1,0 +1,145 @@
+{% extends "base.html" %}
+{% import "macros/row.html" as r %}
+{% import "macros/icons.html" as ic %}
+
+{% block title %}Wanted &middot; Library Wishlist{% endblock %}
+
+{% block controls %}
+<form method="get" action="/" class="bar__group" data-autosubmit>
+  <label class="label sr-only-live" for="group">Group by</label>
+  {# Artist leads because the date on a row is the moment an import ran rather
+     than the moment anything was loved: on the queue this was built against,
+     156 of 160 rows carry one timestamp, so a date grouping files almost the
+     whole list under a single header and the header stops being a landmark.
+     Date stays on the control, where it earns its place once loves are
+     arriving live rather than in a batch. #}
+  <select class="select field-sm" id="group" name="group">
+    <option value="artist" {% if group_by == 'artist' %}selected{% endif %}>group: artist</option>
+    <option value="date" {% if group_by == 'date' %}selected{% endif %}>group: date</option>
+  </select>
+  <noscript><button class="btn" data-size="sm" type="submit">Apply</button></noscript>
+</form>
+{# Selecting works by keyboard and pointer on the rows themselves; this only
+   saves the sixty presses that selecting a whole page would otherwise cost, so
+   it appears once scripting has confirmed it can do anything. #}
+<button type="button" class="btn" data-variant="ghost" data-size="sm" id="select-all" hidden>
+  Select all loaded
+</button>
+{# A real GET form, so searching works with scripting off and a result is a
+   linkable URL. The script intercepts submit and swaps the rack in place. #}
+<form class="search" id="search" method="get" action="/" role="search">
+  <input type="hidden" name="group" value="{{ group_by }}">
+  <label class="label sr-only-live" for="filter">Search your want list</label>
+  <input class="input field-sm" id="filter" name="q" type="search" placeholder="search"
+         value="{{ q }}" autocomplete="off" aria-controls="rack" aria-describedby="filter-hint">
+  <button class="btn" type="submit" data-variant="outline">Search</button>
+  <span class="sr-only-live" id="filter-hint">Press slash to focus, escape to clear.
+    Searches every track, not only the ones on screen.</span>
+</form>
+{% endblock %}
+
+{% block content %}
+{% if total == 0 %}
+  {# A good state, not a failure. Owning everything you love is the end this
+     whole application is aiming at, so the copy does not apologise for it. #}
+  <div class="empty">
+    <p class="empty__head">Want list</p>
+    <p class="empty__body">Nothing on the want list. Love a track on Last.fm, ListenBrainz or
+      Navidrome and it lands here within a minute.</p>
+    <button type="button" class="btn" hx-post="{{ API.scan }}" hx-swap="none"
+            hx-indicator="#rack-skeleton">
+      {{ ic.icon('refresh', 15, 2) }} Check sources now
+    </button>
+  </div>
+  {% include "partials/skeleton.html" %}
+{% else %}
+
+  {# Arriving rows buffer here rather than pushing the page down. The counter
+     is user-triggered, so nothing ever moves under someone mid-decision. #}
+  <div class="newpill" id="newpill" role="status" hidden>
+    <span><span class="newpill__n" id="newpill-n">0</span> new loves</span>
+    <button type="button" class="btn" data-size="sm" id="newpill-show">Show</button>
+  </div>
+
+  <p class="sr-only-live" id="rack-keys">Arrow keys move between tracks. S selects a track,
+    C claims it, X ignores it.</p>
+
+  <ul class="rack" id="rack" role="list" data-view="wanted" data-group="{{ group_by }}"
+      aria-describedby="rack-keys">
+    {% for g in groups %}
+      {{ r.group_head(g) }}
+      {% for t in g.tracks %}{{ r.row(t, 'wanted') }}{% endfor %}
+    {% endfor %}
+  </ul>
+
+  {% if shown is defined and shown < total %}
+  {# A page is a window over the list. More rows append below everything
+     already on screen and nothing above them is re-rendered, so asking for
+     more cannot move a row out from under whoever is reading it. It is an
+     ordinary link to a longer page, which is what makes it work with
+     scripting off; with scripting on the browser fetches the window instead
+     and keeps the scroll position it had. #}
+  <div class="more" id="more" data-offset="{{ shown }}" data-limit="{{ page_size }}"
+       data-total="{{ total }}" data-group="{{ group_by }}">
+    <a class="btn" data-variant="outline" id="more-load"
+       href="/?group={{ group_by }}&amp;show={{ shown + page_size }}">
+      {{ ic.icon('down', 15, 2) }}
+      <span id="more-label">Load {{ [page_size, total - shown]|min }} more</span>
+    </a>
+    <p class="more__count"><b id="more-shown">{{ shown }}</b> of {{ total }} loaded</p>
+    <p class="more__note" id="more-note" hidden></p>
+  </div>
+  {% endif %}
+
+  <div class="empty" id="filter-empty" hidden>
+    <p class="empty__head">Filter</p>
+    <p class="empty__body">No wanted tracks match <b id="filter-echo"></b>.</p>
+    <p class="empty__body" id="filter-more" hidden>The filter reads the rows that are loaded.
+      <b id="filter-more-n">0</b> are still on the server.</p>
+    <div class="empty__actions">
+      <button type="button" class="btn" data-variant="outline" id="filter-clear">Clear filter</button>
+      <button type="button" class="btn" data-variant="outline" id="filter-load" hidden>
+        Load the rest
+      </button>
+    </div>
+  </div>
+
+  {# Confirming claims in bulk authorises money to be spent, so the number is
+     stated in words before anything is sent, the press that arms the confirm
+     is not the press that fires it, focus lands on the way out rather than on
+     the confirm, and the queue can be stopped once it is running. #}
+  <div class="bulk" id="bulk" role="region" aria-label="Selected tracks" hidden>
+    <p class="bulk__count"><b id="bulk-n">0</b> selected</p>
+    <p class="bulk__note" id="bulk-note" hidden></p>
+
+    <div class="bulk__step" data-step="pick">
+      <label class="label" for="bulk-store">Claim at</label>
+      <select class="select field-sm" id="bulk-store"></select>
+      <button type="button" class="btn" data-variant="ghost" data-size="sm" id="bulk-clear">
+        Clear selection
+      </button>
+      <button type="button" class="btn" data-variant="override" id="bulk-arm">
+        Confirm claims
+      </button>
+    </div>
+
+    <div class="bulk__step" data-step="ask" hidden>
+      <p class="bulk__ask" id="bulk-ask"></p>
+      <button type="button" class="btn" data-variant="outline" id="bulk-back">
+        Keep the selection
+      </button>
+      <button type="button" class="btn" data-variant="override" data-armed="true" id="bulk-go">
+        Confirm
+      </button>
+    </div>
+
+    <div class="bulk__step" data-step="sent" hidden>
+      <p class="bulk__sent" id="bulk-sent"></p>
+      <button type="button" class="btn" data-variant="outline" id="bulk-stop">Stop the queue</button>
+      <button type="button" class="btn" data-variant="ghost" data-size="sm" id="bulk-done">Done</button>
+    </div>
+  </div>
+
+  {% include "partials/skeleton.html" %}
+{% endif %}
+{% endblock %}

@@ -1,0 +1,1246 @@
+/* The live connection, the keyboard, and the audio preview.
+ *
+ * One rule governs everything below: an arriving track must never move content
+ * under a reading user. A wishlist that reorders itself while you are deciding
+ * whether to spend money on something is worse than one that updates on a
+ * timer, and unexpected motion is the single worst thing this interface can do
+ * to someone with ADHD or visual snow. Rows therefore arrive only when the
+ * reader is demonstrably not reading, and every insertion that could push the
+ * viewport re-anchors the scroll position afterwards.
+ *
+ * The server decides what a row looks like. Events carry facts, not markup, so
+ * when one lands the client refetches the affected fragment. The one exception
+ * is claim progress, which is pure presentation of fields already in the event
+ * and would otherwise cost a round trip five times per purchase.
+ *
+ * The page holds a window over the list rather than the whole of it. Rows
+ * arrive from the server in two ways and both obey the rule above: a window
+ * asked for by the reader appends below everything on screen, and a live
+ * arrival either inserts at the top when nobody is reading or waits behind a
+ * counter until asked for.
+ */
+(function () {
+  'use strict';
+
+  var rack = null;
+  var announcer = null;
+  var audio = null;
+  var playingId = null;
+  var more = null;
+  var bulk = null;
+
+  /* Track ids that arrived while someone was reading. They wait here until the
+     user asks for them. */
+  var pending = [];
+  var stages = {};
+  var phaseOrder = [];
+
+  function $(sel, root) { return (root || document).querySelector(sel); }
+  function $$(sel, root) { return Array.prototype.slice.call((root || document).querySelectorAll(sel)); }
+
+  function say(text) {
+    if (announcer) announcer.textContent = text;
+  }
+
+  function reducedMotion() {
+    return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  }
+
+  /* ------------------------------------------------------------------ *
+   * fragments
+   * ------------------------------------------------------------------ */
+
+  function fragment(url) {
+    return fetch(url, { headers: { 'X-Requested-With': 'libwish' }, credentials: 'same-origin' })
+      .then(function (res) { return res.ok ? res.text() : null; })
+      .catch(function () { return null; });
+  }
+
+  /* Swap in new markup and put the reader back where they were.
+   *
+   * Anything inserted above the viewport lengthens the page above the fold,
+   * which scrolls the content under the cursor down by exactly that much. The
+   * fix is to measure the growth and give it straight back. */
+  function preservingScroll(mutate) {
+    var before = document.documentElement.scrollHeight;
+    var y = window.scrollY;
+    mutate();
+    var grew = document.documentElement.scrollHeight - before;
+    if (grew !== 0 && y > 0) window.scrollTo({ top: y + grew, behavior: 'auto' });
+  }
+
+  /* ------------------------------------------------------------------ *
+   * covers
+   * ------------------------------------------------------------------ */
+
+  /* Cover art is served by this app from a local cache and answers 404 until
+     the cache holds it, which early on is most of the list. Hiding the image
+     uncovers the mark the cell already draws underneath, so a miss looks like
+     a designed empty sleeve and the cell keeps its size either way. */
+  function coverFailed(img) {
+    img.hidden = true;
+  }
+
+  /* An image can finish, or fail, before this file runs and before a fragment
+     is inserted. `complete` with no intrinsic width is a load that failed, and
+     it is the only way to catch the ones whose error event already went by. */
+  function sweepCovers(root) {
+    $$('img[data-cover]', root).forEach(function (img) {
+      if (img.complete && img.naturalWidth === 0) coverFailed(img);
+    });
+  }
+
+  /* Error does not bubble, so it is caught on the way down. */
+  function watchCovers() {
+    document.addEventListener('error', function (e) {
+      var img = e.target;
+      if (img && img.tagName === 'IMG' && img.hasAttribute('data-cover')) coverFailed(img);
+    }, true);
+    sweepCovers(document);
+  }
+
+  /* ------------------------------------------------------------------ *
+   * windowing
+   * ------------------------------------------------------------------ */
+
+  function num(value, fallback) {
+    var n = parseInt(value, 10);
+    return isNaN(n) ? fallback : n;
+  }
+
+  function moreNote(text) {
+    var note = $('#more-note');
+    if (!note) return;
+    note.textContent = text || '';
+    note.hidden = !text;
+  }
+
+  /* Fold an arriving window into the rack. A group can straddle the boundary
+     between two windows, so a header for the group already open at the bottom
+     of the page is dropped rather than repeated. */
+  function appendWindow(holder) {
+    var tail = rack.lastElementChild;
+    var openGroup = '';
+    while (tail) {
+      if (tail.classList.contains('group-head')) { openGroup = tail.dataset.group || ''; break; }
+      if (tail.classList.contains('row')) { openGroup = tail.dataset.groupKey || ''; break; }
+      tail = tail.previousElementSibling;
+    }
+    var added = 0;
+    Array.prototype.slice.call(holder.children).forEach(function (node) {
+      if (node.classList.contains('group-head') && node.dataset.group === openGroup) return;
+      if (node.id && document.getElementById(node.id)) return;
+      rack.appendChild(node);
+      if (node.classList.contains('row')) added += 1;
+    });
+    return added;
+  }
+
+  function paintMore() {
+    if (!more) return;
+    var offset = num(more.dataset.offset, 0);
+    var total = num(more.dataset.total, 0);
+    var step = num(more.dataset.limit, 60);
+    var left = Math.max(total - offset, 0);
+    var shown = $('#more-shown');
+    var label = $('#more-label');
+    var link = $('#more-load');
+    if (shown) shown.textContent = String(offset);
+    if (label) label.textContent = 'Load ' + Math.min(step, left) + ' more';
+    if (link) {
+      link.href = '/?group=' + encodeURIComponent(more.dataset.group || 'artist') +
+                  '&show=' + (offset + step);
+    }
+    more.hidden = left === 0;
+    var hint = $('#filter-more');
+    var hintN = $('#filter-more-n');
+    var loadRest = $('#filter-load');
+    if (hint) hint.hidden = left === 0;
+    if (hintN) hintN.textContent = String(left);
+    if (loadRest) loadRest.hidden = left === 0;
+  }
+
+  /* Rows append below everything on screen, which is why this needs no scroll
+     correction: nothing above the reader's position changes. */
+  function loadMore(all) {
+    if (!rack || !more || more.dataset.busy === 'true') return Promise.resolve();
+    var offset = num(more.dataset.offset, 0);
+    var total = num(more.dataset.total, 0);
+    var left = Math.max(total - offset, 0);
+    if (!left) { paintMore(); return Promise.resolve(); }
+    var limit = all ? left : Math.min(num(more.dataset.limit, 60), left);
+    more.dataset.busy = 'true';
+    moreNote('');
+    var url = '/ui/page?view=' + encodeURIComponent(rack.dataset.view || 'wanted') +
+              '&group=' + encodeURIComponent(more.dataset.group || 'artist') +
+              '&offset=' + offset + '&limit=' + limit;
+    return fragment(url).then(function (html) {
+      more.dataset.busy = 'false';
+      if (html === null) {
+        moreNote('The next rows did not load. The list on screen is still current. Try again.');
+        say('The next rows did not load.');
+        return;
+      }
+      var holder = document.createElement('ul');
+      holder.innerHTML = html;
+      var added = appendWindow(holder);
+      more.dataset.offset = String(offset + added);
+      paintMore();
+      sweepCovers(rack);
+      syncPicks();
+      if (window.htmx) window.htmx.process(rack);
+      /* Rows that land while a filter is on are held to the same filter, so
+         the count under the box keeps matching what is on screen. */
+      var filter = $('#filter');
+      if (filter && filter.value) applyFilter(filter.value);
+      say(added + (added === 1 ? ' more track loaded, ' : ' more tracks loaded, ') +
+          more.dataset.offset + ' of ' + total + ' on screen');
+    });
+  }
+
+  function markNew(row) {
+    row.classList.add('row--new');
+    if (!reducedMotion()) row.classList.add('row--entering');
+    var hold = parseInt(getComputedStyle(rack).getPropertyValue('--marker-hold'), 10) || 2000;
+    window.setTimeout(function () { row.classList.add('row--settled'); }, hold);
+  }
+
+  /* ------------------------------------------------------------------ *
+   * insertion
+   * ------------------------------------------------------------------ */
+
+  function readerIsBusy() {
+    if (window.scrollY > 8) return true;
+    if (document.activeElement && document.activeElement.closest &&
+        document.activeElement.closest('#rack')) return true;
+    if ($('.plate.is-working')) return true;
+    return false;
+  }
+
+  function groupHeadFor(key, label) {
+    var head = rack.querySelector('.group-head[data-group="' + CSS.escape(key) + '"]');
+    if (head) return head;
+    head = document.createElement('li');
+    head.className = 'group-head';
+    head.setAttribute('role', 'presentation');
+    head.setAttribute('data-group', key);
+    head.innerHTML = '<span></span><span class="group-head__count" data-group-count>0</span>' +
+                     '<span class="group-head__rule"></span>';
+    head.firstChild.textContent = label || key;
+    rack.insertBefore(head, rack.firstChild);
+    return head;
+  }
+
+  function bumpGroupCount(head, delta) {
+    var el = head.querySelector('[data-group-count]');
+    if (el) el.textContent = String((parseInt(el.textContent, 10) || 0) + delta);
+  }
+
+  function insertRows(ids) {
+    if (!rack || !ids.length) return Promise.resolve();
+    var view = rack.dataset.view || 'wanted';
+    var group = rack.dataset.group || 'date';
+    var url = '/ui/rows?view=' + encodeURIComponent(view) +
+              '&group=' + encodeURIComponent(group) +
+              '&ids=' + ids.join(',');
+    return fragment(url).then(function (html) {
+      if (!html) return;
+      var holder = document.createElement('ul');
+      holder.innerHTML = html;
+      var rows = $$('.row', holder);
+      preservingScroll(function () {
+        rows.forEach(function (row) {
+          if (document.getElementById(row.id)) return;
+          var key = row.dataset.groupKey || '';
+          var head = groupHeadFor(key, key);
+          head.parentNode.insertBefore(row, head.nextSibling);
+          bumpGroupCount(head, 1);
+          markNew(row);
+        });
+      });
+      if (window.htmx) window.htmx.process(rack);
+      sweepCovers(rack);
+      /* A live arrival lengthens the list and lands inside the part of it
+         already on screen, so both figures move together and "60 of 160"
+         stays true. A row that a later window sends again is dropped by id,
+         which is what keeps the two counts from drifting apart. */
+      if (more && rows.length) {
+        more.dataset.total = String(num(more.dataset.total, 0) + rows.length);
+        more.dataset.offset = String(num(more.dataset.offset, 0) + rows.length);
+        paintMore();
+      }
+      say(rows.length === 1 ? 'One new love added to the list'
+                            : rows.length + ' new loves added to the list');
+    });
+  }
+
+  function showPill() {
+    var pill = $('#newpill');
+    if (!pill) return;
+    $('#newpill-n').textContent = String(pending.length);
+    pill.hidden = pending.length === 0;
+  }
+
+  function onTrackAdded(data) {
+    if (!rack || rack.dataset.view !== 'wanted') return;
+    if (document.getElementById('row-' + data.id)) return;
+    if (readerIsBusy()) {
+      if (pending.indexOf(data.id) === -1) pending.push(data.id);
+      showPill();
+      say(pending.length + ' new loves waiting');
+      return;
+    }
+    insertRows([data.id]);
+  }
+
+  function onTrackRemoved(data) {
+    var row = document.getElementById('row-' + data.id);
+    if (!row) return;
+    var head = row.previousElementSibling;
+    while (head && !head.classList.contains('group-head')) head = head.previousElementSibling;
+    var drop = function () {
+      preservingScroll(function () {
+        if (head) bumpGroupCount(head, -1);
+        row.remove();
+      });
+      /* A row that left the list cannot be part of a confirm, and the count
+         in the bar has to say so before anyone presses anything. */
+      if (picked[String(data.id)] !== undefined) {
+        delete picked[String(data.id)];
+        paintBulk();
+      }
+      if (more) {
+        more.dataset.total = String(Math.max(num(more.dataset.total, 0) - 1, 0));
+        more.dataset.offset = String(Math.max(num(more.dataset.offset, 0) - 1, 0));
+        paintMore();
+      }
+    };
+    if (reducedMotion()) { drop(); return; }
+    row.classList.add('row--leaving');
+    window.setTimeout(drop, 140);
+  }
+
+  /* Ignoring a track and restoring one both arrive as an update carrying the
+     new status rather than as a removal, so the view has to decide for itself
+     whether the row still belongs on screen. */
+  var BELONGS = {
+    wanted: ['queued'],
+    owned: ['purchased', 'owned'],
+    ignored: ['ignored']
+  };
+
+  function onTrackUpdated(d) {
+    var row = document.getElementById('row-' + d.id);
+    if (!row) return;
+    var allowed = BELONGS[(rack && rack.dataset.view) || 'wanted'] || [];
+    if (d.status && allowed.indexOf(d.status) === -1) {
+      onTrackRemoved(d);
+      return;
+    }
+    refreshRow(d.id);
+  }
+
+  /* ------------------------------------------------------------------ *
+   * tab counts
+   * ------------------------------------------------------------------ */
+
+  var countsTimer = null;
+
+  /* Asked for, never worked out from the event. A count kept by adding one and
+     taking one away is right until the first event that does not arrive, and
+     the stream is explicitly allowed to drop them from a client that has
+     fallen behind. The server already knows the answer.
+
+     Coalesced, because confirming forty claims at once produces forty events
+     inside a second and the tabs only have to be right at the end of it. */
+  function countsChanged() {
+    if (countsTimer) return;
+    countsTimer = window.setTimeout(function () {
+      countsTimer = null;
+      paintCounts();
+    }, 250);
+  }
+
+  function paintCounts() {
+    fetch('/api/counts', { headers: { 'X-Requested-With': 'libwish' }, credentials: 'same-origin' })
+      .then(function (res) { return res.ok ? res.json() : null; })
+      .then(function (counts) {
+        if (!counts) return;
+        $$('.tab__count').forEach(function (el) {
+          var view = el.dataset.count;
+          if (view && counts[view] !== undefined) el.textContent = String(counts[view]);
+        });
+      })
+      .catch(function () { /* the numbers stay as they were, which is honest */ });
+  }
+
+  /* ------------------------------------------------------------------ *
+   * plates and claims
+   * ------------------------------------------------------------------ */
+
+  function refreshRow(trackId) {
+    var plate = document.getElementById('plate-' + trackId);
+    var detail = document.getElementById('detail-' + trackId);
+    if (plate) {
+      fragment('/ui/plate/' + trackId).then(function (html) {
+        if (!html) return;
+        var was = plate.dataset.state;
+        plate.outerHTML = html;
+        var fresh = document.getElementById('plate-' + trackId);
+        /* The press fires once, at the moment a purchase becomes a file. It is
+           the only orchestrated motion in the application. */
+        if (fresh && fresh.dataset.state === 'owned' && was !== 'owned' && !reducedMotion()) {
+          fresh.classList.add('plate--pressing');
+          window.setTimeout(function () {
+            fresh.classList.remove('plate--pressing');
+            fresh.style.willChange = '';
+          }, 240);
+        }
+        /* A track that is claiming, or that already landed, drops out of the
+           selection and stops offering itself: confirming it a second time
+           would be paying twice for the same row. */
+        var box = document.querySelector('.pick[data-pick="' + trackId + '"]');
+        if (box && fresh && (fresh.dataset.state === 'working' || fresh.dataset.state === 'owned')) {
+          if (box.checked) setPicked(box, false);
+          box.disabled = true;
+        }
+      });
+    }
+    if (detail) {
+      fragment('/ui/detail/' + trackId).then(function (html) {
+        if (html !== null) {
+          detail.innerHTML = html;
+          if (window.htmx) window.htmx.process(detail);
+        }
+      });
+    }
+  }
+
+  function formatMB(bytes) {
+    return (bytes / 1048576).toFixed(1);
+  }
+
+  function onJobProgress(d) {
+    if (d.kind !== 'claim' || !d.track_id) return;
+    var plate = document.getElementById('plate-' + d.track_id);
+    if (!plate || plate.dataset.state !== 'working') { refreshRow(d.track_id); return; }
+
+    var stage = stages[d.phase] || {};
+    var step = d.step || (phaseOrder.indexOf(d.phase) + 1);
+    var of = d.of || phaseOrder.length;
+
+    var lines = plate.querySelectorAll('.plate__line span:first-child');
+    if (lines[0]) lines[0].textContent = stage.label || String(d.phase).toUpperCase();
+    if (lines[1]) lines[1].textContent = step + ' OF ' + of;
+    plate.setAttribute('aria-valuenow', String(step));
+    plate.setAttribute('aria-valuetext', (stage.label || d.phase).toLowerCase() +
+                       ', step ' + step + ' of ' + of);
+    $$('.plate__step', plate).forEach(function (seg, i) {
+      seg.classList.toggle('is-done', i < step);
+    });
+
+    var claim = document.querySelector('[data-claim="' + d.track_id + '"]');
+    if (claim) {
+      claim.dataset.phase = d.phase;
+      var line = $('[data-claim-line]', claim);
+      if (line && stage.line) {
+        line.textContent = stage.line
+          .replace('{store}', d.store || 'Qobuz')
+          .replace('{title}', claim.dataset.title || '')
+          .replace('{artist}', claim.dataset.artist || '');
+      }
+      var rule = $('.claim__rule', claim);
+      var fill = $('[data-claim-fill]', claim);
+      var determinate = d.bytes_total > 0;
+      if (rule) rule.dataset.determinate = determinate ? 'true' : 'false';
+      if (fill && determinate) {
+        fill.style.width = Math.round((d.bytes_done / d.bytes_total) * 100) + '%';
+      }
+      var bytes = $('[data-claim-bytes]', claim);
+      if (bytes && determinate) {
+        bytes.textContent = formatMB(d.bytes_done) + ' of ' + formatMB(d.bytes_total) + ' MB';
+      }
+    }
+    say((stage.label || d.phase) + ', step ' + step + ' of ' + of);
+  }
+
+  /* ------------------------------------------------------------------ *
+   * selection and bulk confirm
+   * ------------------------------------------------------------------ *
+   *
+   * Confirming a claim tells the software to go through with a purchase it was
+   * not confident enough to make on its own, so confirming a hundred of them
+   * at once is the most expensive thing this interface can do. Three rules
+   * follow from that, and every branch below exists to hold one of them:
+   *
+   *   the number is stated in a sentence before anything is sent,
+   *   the press that arms the confirm is never the press that fires it, and
+   *   what has been sent can be stopped.
+   *
+   * The store matters too. One confirm carries one store, so a selection that
+   * spans two of them sends the tracks at the chosen store and says plainly
+   * how many it left behind rather than quietly claiming them somewhere they
+   * were never listed.
+   */
+
+  var picked = Object.create(null); /* track id -> the store it is listed at */
+  var stage = 'pick';
+  var armedAt = 0;
+  var sentIds = [];
+  var lastPicked = -1;
+  var shiftHeld = false;
+
+  function pickCount() {
+    return Object.keys(picked).length;
+  }
+
+  function pickBoxes() {
+    return rack ? $$('.pick', rack) : [];
+  }
+
+  function storeLabel(id) {
+    return id ? id.charAt(0).toUpperCase() + id.slice(1) : 'the store';
+  }
+
+  /* Selected rows that the named store actually sells. A row carries every
+     store it can be bought at rather than one it has been assigned to: most
+     rows are assigned to none, and treating that as "no store" is what left
+     the selection column empty and this bar with nothing to offer. */
+  function idsFor(store) {
+    return Object.keys(picked).filter(function (id) {
+      return picked[id].indexOf(store) !== -1;
+    });
+  }
+
+  function setPicked(box, on, quiet) {
+    box.checked = on;
+    if (on) picked[box.dataset.pick] = (box.dataset.stores || '').split(',').filter(Boolean);
+    else delete picked[box.dataset.pick];
+    var row = box.closest('.row');
+    if (row) row.classList.toggle('is-picked', on);
+    if (!quiet) paintBulk();
+  }
+
+  function clearPicks(quiet) {
+    pickBoxes().forEach(function (box) { setPicked(box, false, true); });
+    picked = Object.create(null);
+    if (!quiet) paintBulk();
+  }
+
+  /* Rows arriving after a selection was made come in unchecked, and a row that
+     left the list takes its id with it. */
+  function syncPicks() {
+    var live = Object.create(null);
+    pickBoxes().forEach(function (box) {
+      var id = box.dataset.pick;
+      if (picked[id] === undefined) return;
+      live[id] = picked[id];
+      box.checked = true;
+      var row = box.closest('.row');
+      if (row) row.classList.add('is-picked');
+    });
+    picked = live;
+    paintBulk();
+  }
+
+  /* Everything the reader can currently see, filtered rows excluded: a
+     selection that quietly included rows hidden behind a filter would be a
+     count nobody could check. */
+  function selectAllLoaded() {
+    pickBoxes().forEach(function (box) {
+      var row = box.closest('.row');
+      if (row && !row.hidden) setPicked(box, true, true);
+    });
+    paintBulk();
+    say(pickCount() + ' selected');
+  }
+
+  function onPickChange(box) {
+    var boxes = pickBoxes();
+    var at = boxes.indexOf(box);
+    setPicked(box, box.checked, true);
+    if (shiftHeld && lastPicked >= 0 && at >= 0 && at !== lastPicked) {
+      var from = Math.min(at, lastPicked);
+      var to = Math.max(at, lastPicked);
+      for (var i = from; i <= to; i += 1) {
+        var row = boxes[i].closest('.row');
+        if (row && !row.hidden) setPicked(boxes[i], box.checked, true);
+      }
+      say((box.checked ? 'Selected ' : 'Cleared ') + (to - from + 1) + ', ' +
+          pickCount() + ' selected in all');
+    }
+    shiftHeld = false;
+    lastPicked = at;
+    paintBulk();
+  }
+
+  function showStage(next) {
+    stage = next;
+    $$('.bulk__step', bulk).forEach(function (step) {
+      step.hidden = step.dataset.step !== next;
+    });
+  }
+
+  /* One line for outcomes, carried across every step of the bar. `tone` marks
+     the ones that are failures; a batch that was capped is not one. */
+  function bulkNote(text, tone) {
+    var note = $('#bulk-note');
+    if (!note) return;
+    note.textContent = text || '';
+    note.hidden = !text;
+    if (tone) note.setAttribute('data-tone', tone);
+    else note.removeAttribute('data-tone');
+  }
+
+  function paintStores() {
+    var select = $('#bulk-store');
+    if (!select) return;
+    var list = [];
+    Object.keys(picked).forEach(function (id) {
+      picked[id].forEach(function (store) {
+        if (list.indexOf(store) === -1) list.push(store);
+      });
+    });
+    list.sort();
+    if (select.dataset.list === list.join(',')) return;
+    var chosen = select.value;
+    select.dataset.list = list.join(',');
+    select.textContent = '';
+    list.forEach(function (id) {
+      var option = document.createElement('option');
+      option.value = id;
+      option.textContent = storeLabel(id);
+      select.appendChild(option);
+    });
+    if (list.indexOf(chosen) !== -1) select.value = chosen;
+  }
+
+  function paintBulk() {
+    if (!bulk) return;
+    var n = pickCount();
+    var count = $('#bulk-n');
+    if (count) count.textContent = String(n);
+    paintStores();
+    /* A selection emptied while the confirm is armed disarms it: the sentence
+       on screen would otherwise name a count that no longer exists. What has
+       already been sent stays on screen either way, because that is where the
+       control that stops it lives. */
+    if (n === 0 && stage !== 'sent') {
+      showStage('pick');
+      bulk.hidden = true;
+    } else {
+      bulk.hidden = false;
+    }
+    /* The bar floats over the list, so the list is given room to be scrolled
+       clear of it. The space goes below everything on screen, which is why
+       adding it moves nothing. */
+    document.body.classList.toggle('has-bulk', !bulk.hidden);
+  }
+
+  function armBulk() {
+    var select = $('#bulk-store');
+    var store = select ? select.value : '';
+    var ids = idsFor(store);
+    if (!ids.length) return;
+    var others = pickCount() - ids.length;
+    var ask = 'Confirm ' + ids.length + (ids.length === 1 ? ' claim at ' : ' claims at ') +
+      storeLabel(store) + '. Each one goes through on your say-so rather than on a' +
+      ' confidence match, so ' + (ids.length === 1 ? 'one track is' : ids.length + ' tracks are') +
+      ' bought and filed.';
+    if (others) {
+      ask += ' The other ' + others + (others === 1 ? ' selected track is' : ' selected tracks are') +
+        ' listed at a different store. Confirm those separately.';
+    }
+    var line = $('#bulk-ask');
+    var go = $('#bulk-go');
+    if (line) line.textContent = ask;
+    if (go) go.textContent = 'Confirm ' + ids.length;
+    bulkNote('');
+    showStage('ask');
+    armedAt = Date.now();
+    /* Focus lands on the way out, never on the confirm. A held Enter or a
+       stray one has to land somewhere, and it must not land on money. */
+    var back = $('#bulk-back');
+    if (back) back.focus();
+    say(ask);
+  }
+
+  function fireBulk(repeat) {
+    /* Neither a held key nor a second press inside half a second spends
+       anything: both are the same finger, not a second decision. */
+    if (repeat || Date.now() - armedAt < 500) return;
+    var select = $('#bulk-store');
+    var store = select ? select.value : '';
+    var ids = idsFor(store);
+    if (!ids.length) return;
+    var go = $('#bulk-go');
+    if (go) go.disabled = true;
+    fetch('/api/claim/confirm', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'libwish' },
+      body: JSON.stringify({ track_ids: ids.map(Number), store: store })
+    }).then(function (res) {
+      return res.json().then(function (body) { return { status: res.status, ok: res.ok, body: body }; },
+                             function () { return { status: res.status, ok: res.ok, body: null }; });
+    }).catch(function () {
+      return { status: 0, ok: false, body: null };
+    }).then(function (answer) {
+      if (go) go.disabled = false;
+      if (!answer.ok || !answer.body || !answer.body.ok) {
+        bulkFailed(answer.status, answer.body);
+        return;
+      }
+      /* The server caps a batch and says how many it took. The tail stays
+         selected rather than being dropped quietly, because a bulk action
+         that loses part of its list reads exactly like one that worked. */
+      var n = typeof answer.body.confirmed === 'number' ? answer.body.confirmed : ids.length;
+      var taken = ids.slice(0, n);
+      sentIds = taken.slice();
+      taken.forEach(function (id) {
+        var box = rack.querySelector('.pick[data-pick="' + id + '"]');
+        if (box) setPicked(box, false, true);
+        else delete picked[id];
+      });
+      var left = ids.length - n;
+      bulkNote(left
+        ? 'The first ' + n + ' of ' + ids.length + ' went through. The other ' + left +
+          ' are still selected: confirm again to send them.'
+        : '');
+      var sent = $('#bulk-sent');
+      if (sent) {
+        sent.textContent = n + (n === 1 ? ' claim is queued at ' : ' claims are queued at ') +
+          storeLabel(store) + '. Stopping the queue cancels every claim that has not started yet.';
+      }
+      showStage('sent');
+      paintBulk();
+      var stop = $('#bulk-stop');
+      if (stop) { stop.hidden = false; stop.focus(); }
+      say(n + ' claims queued at ' + storeLabel(store));
+    });
+  }
+
+  /* Says what happened and what to do, and does not apologise. The selection
+     is left alone so the same press can be tried again. */
+  function bulkFailed(status, body) {
+    var unknown = body && body.unknown ? body.unknown.length : 0;
+    var text;
+    if (!status) {
+      text = 'Nothing was claimed. The server did not answer. Check the connection and' +
+             ' try again.';
+    } else if (unknown) {
+      text = 'Nothing was claimed. ' + unknown + ' of the selected tracks are no longer on' +
+             ' the server. Reload the page and select again.';
+    } else if (body && body.error) {
+      text = 'Nothing was claimed. The server said: ' + body.error + '.';
+    } else {
+      text = 'Nothing was claimed. The server answered ' + status + ' for the bulk confirm.' +
+             ' Try again, or claim these tracks one at a time.';
+    }
+    showStage('pick');
+    bulkNote(text, 'flag');
+    say(text);
+  }
+
+  function stopBulk() {
+    var ids = sentIds.slice();
+    sentIds = [];
+    var sent = $('#bulk-sent');
+    var stop = $('#bulk-stop');
+    if (stop) stop.hidden = true;
+    if (sent) sent.textContent = 'Stopping ' + ids.length + '.';
+    var chain = Promise.resolve();
+    ids.forEach(function (id) {
+      chain = chain.then(function () {
+        return fetch('/api/claim/' + id + '/cancel', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'X-Requested-With': 'libwish' }
+        }).catch(function () { /* the row's own plate reports what survived */ });
+      });
+    });
+    chain.then(function () {
+      var text = 'Stopped. A claim already running finishes on its own and reports on its row.';
+      if (sent) sent.textContent = text;
+      say(text);
+    });
+  }
+
+  function dismissBulk() {
+    sentIds = [];
+    showStage('pick');
+    bulkNote('');
+    paintBulk();
+  }
+
+  /* ------------------------------------------------------------------ *
+   * connection
+   * ------------------------------------------------------------------ */
+
+  var source = null;
+  var countdown = null;
+
+  function offline(on) {
+    var banner = $('#banner-offline');
+    if (!banner) return;
+    banner.hidden = !on;
+    if (!on) {
+      if (countdown) { window.clearInterval(countdown); countdown = null; }
+      return;
+    }
+    var left = 8;
+    var counter = $('#retry-count');
+    if (counter) counter.textContent = String(left);
+    if (countdown) window.clearInterval(countdown);
+    countdown = window.setInterval(function () {
+      left = left > 1 ? left - 1 : 8;
+      if (counter) counter.textContent = String(left);
+    }, 1000);
+    say('Live updates disconnected. The list on screen is the last one received.');
+  }
+
+  function connect() {
+    if (source) source.close();
+    source = new EventSource(document.body.dataset.events || '/api/events');
+
+    source.addEventListener('open', function () { offline(false); });
+    source.addEventListener('error', function () {
+      if (source.readyState === EventSource.CLOSED || source.readyState === EventSource.CONNECTING) {
+        offline(true);
+      }
+    });
+
+    var on = function (name, fn) {
+      source.addEventListener(name, function (e) {
+        var data = {};
+        try { data = JSON.parse(e.data); } catch (err) { return; }
+        offline(false);
+        fn(data);
+      });
+    };
+
+    /* Counted here rather than inside the handlers below. Two of them return
+       early when the track is not on this page, which is exactly the case the
+       tabs exist for: a claim finishing while the ignored list is open moves a
+       track between two views the reader is not looking at, and the numbers
+       have to follow it. */
+    on('track.added', function (d) { onTrackAdded(d); countsChanged(); });
+    on('track.removed', function (d) { onTrackRemoved(d); countsChanged(); });
+    on('track.updated', function (d) { onTrackUpdated(d); countsChanged(); });
+    on('track.source_added', function (d) { refreshRow(d.id); });
+    on('job.started', function (d) { if (d.track_id) refreshRow(d.track_id); });
+    on('job.progress', onJobProgress);
+    /* A claim that lands writes the new status straight to the row and
+       publishes only the job event, so this is the moment a track changes
+       which tab it belongs to. The row itself deliberately stays where it is,
+       showing its new plate; the counts are what move. */
+    on('job.finished', function (d) {
+      if (d.track_id) refreshRow(d.track_id);
+      countsChanged();
+    });
+    on('job.failed', function (d) { if (d.track_id) refreshRow(d.track_id); });
+    on('credential.updated', onCredential);
+    on('provider.state', onCredential);
+    on('scan.requested', function (d) {
+      say(d.ok ? 'Sources checked' : 'Could not check sources');
+    });
+  }
+
+  /* A page kept in the back/forward cache keeps its EventSource open, and a
+     browser allows only about six connections to one origin. Switching between
+     tabs quickly leaves several cached pages each holding one, and once they
+     are all held the next navigation cannot get a connection at all: the site
+     stops loading while the server sits idle and healthy.
+
+     pagehide is the hook that fires for both a real unload and a move into the
+     cache, so the stream is given up either way. A page restored from the cache
+     gets a fresh one, because the old connection is gone and its own state is
+     stale by then anyway. */
+  window.addEventListener('pagehide', function () {
+    if (source) { source.close(); source = null; }
+  });
+
+  window.addEventListener('pageshow', function (e) {
+    if (e.persisted && window.EventSource) connect();
+  });
+
+  /* Names the consequence, not just the fault: "needs reconnecting" alone does
+     not tell you that loves have stopped arriving. */
+  function onCredential(d) {
+    var banner = $('#banner-credential');
+    var text = $('#credential-text');
+    if (!banner || !text) return;
+    var broken = d.status === 'expired' || d.status === 'revoked' || d.state === 'auth_expired' ||
+                 d.state === 'error';
+    if (!broken) { banner.hidden = true; return; }
+    var who = d.provider || d.provider_id || d.id || 'A source';
+    text.textContent = who.charAt(0).toUpperCase() + who.slice(1) +
+      ' needs reconnecting. New loves are not arriving.';
+    banner.hidden = false;
+    say(text.textContent);
+  }
+
+  /* ------------------------------------------------------------------ *
+   * preview
+   * ------------------------------------------------------------------ */
+
+  function stopPreview() {
+    if (!audio) return;
+    audio.pause();
+    $$('.preview[aria-pressed="true"]').forEach(function (b) {
+      b.setAttribute('aria-pressed', 'false');
+    });
+    playingId = null;
+  }
+
+  function preview(button) {
+    var id = button.dataset.preview;
+    if (playingId === id) { stopPreview(); return; }
+    stopPreview();
+    button.setAttribute('aria-pressed', 'true');
+    playingId = id;
+    fetch('/api/preview/' + id, { credentials: 'same-origin' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (!d.url || playingId !== id) { stopPreview(); return; }
+        audio.src = d.url;
+        audio.play().catch(function () { stopPreview(); });
+      })
+      .catch(stopPreview);
+  }
+
+  /* ------------------------------------------------------------------ *
+   * filter
+   * ------------------------------------------------------------------ */
+
+  function applyFilter(term) {
+    if (!rack) return;
+    var needle = term.trim().toLowerCase();
+    var shown = 0;
+    $$('.group-head', rack).forEach(function (head) {
+      var n = 0;
+      var node = head.nextElementSibling;
+      while (node && !node.classList.contains('group-head')) {
+        var hit = !needle || (node.dataset.search || '').indexOf(needle) !== -1;
+        node.hidden = !hit;
+        if (hit) { n += 1; shown += 1; }
+        node = node.nextElementSibling;
+      }
+      head.hidden = n === 0;
+      var count = head.querySelector('[data-group-count]');
+      if (count) count.textContent = String(n);
+    });
+    var empty = $('#filter-empty');
+    if (empty) {
+      empty.hidden = shown !== 0 || !needle;
+      var echo = $('#filter-echo');
+      if (echo) echo.textContent = needle;
+    }
+    if (needle) say(shown + (shown === 1 ? ' track matches' : ' tracks match'));
+  }
+
+  /* ------------------------------------------------------------------ *
+   * keyboard
+   * ------------------------------------------------------------------ */
+
+  /* A roving tabindex, so leaving a 160-row list costs one Tab rather than
+     one hundred and sixty. */
+  function focusRow(row) {
+    if (!row) return;
+    $$('.row[tabindex="0"]', rack).forEach(function (r) { r.tabIndex = -1; });
+    row.tabIndex = 0;
+    row.focus();
+  }
+
+  function visibleRows() {
+    return $$('.row', rack).filter(function (r) { return !r.hidden; });
+  }
+
+  function typing(el) {
+    if (!el) return false;
+    var tag = el.tagName;
+    return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable;
+  }
+
+  function onKey(e) {
+    var filter = $('#filter');
+
+    if (e.key === '/' && !typing(e.target)) {
+      if (filter) { e.preventDefault(); filter.focus(); filter.select(); }
+      return;
+    }
+    if (e.key === 'Escape') {
+      /* Backing out of the confirm comes first. It is the only one of these
+         with money behind it, and it is the one a reader reaches for. */
+      if (bulk && stage === 'ask') {
+        showStage('pick');
+        var arm = $('#bulk-arm');
+        if (arm) arm.focus();
+        say('Confirm cancelled. The selection is still there.');
+        return;
+      }
+      if (filter && (document.activeElement === filter || filter.value)) {
+        filter.value = '';
+        applyFilter('');
+        filter.blur();
+        return;
+      }
+      if (pickCount()) {
+        clearPicks();
+        say('Selection cleared');
+      }
+      return;
+    }
+    if (typing(e.target) || !rack) return;
+
+    var row = e.target.closest ? e.target.closest('.row') : null;
+
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      var rows = visibleRows();
+      if (!rows.length) return;
+      e.preventDefault();
+      var at = row ? rows.indexOf(row) : -1;
+      var next = e.key === 'ArrowDown' ? Math.min(at + 1, rows.length - 1) : Math.max(at - 1, 0);
+      focusRow(rows[at === -1 ? 0 : next]);
+      return;
+    }
+
+    if (!row) return;
+
+    /* Enter runs the row's one primary action. The refusal override is
+       deliberately not marked primary, so it can never be reached this way. */
+    if (e.key === 'Enter') {
+      /* A row can hold two primaries at once, one of which Alpine has hidden:
+         Buy before the shop is opened, "I bought it" after. Take the one on
+         screen, never the one behind it. */
+      var primary = $$('[data-primary]', row).filter(function (el) {
+        return el.offsetParent !== null;
+      })[0];
+      if (primary) { e.preventDefault(); primary.click(); }
+      return;
+    }
+    /* Selecting from the keyboard costs one key on the focused row, so a
+       hundred and sixty of them are reachable without a pointer. */
+    if (e.key === 's' || e.key === 'S') {
+      var box = row.querySelector('.pick');
+      if (box) {
+        e.preventDefault();
+        setPicked(box, !box.checked);
+        lastPicked = pickBoxes().indexOf(box);
+        say((box.checked ? 'Selected. ' : 'Cleared. ') + pickCount() + ' selected in all');
+      }
+      return;
+    }
+    if (e.key === 'c') {
+      var claim = row.querySelector('[data-act="claim"]');
+      if (claim) { e.preventDefault(); claim.click(); }
+      return;
+    }
+    if (e.key === 'x') {
+      var ignore = row.querySelector('[data-act="ignore"]');
+      if (ignore) { e.preventDefault(); ignore.click(); }
+    }
+  }
+
+  /* ------------------------------------------------------------------ *
+   * theme
+   * ------------------------------------------------------------------ */
+
+  var THEMES = ['system', 'light', 'dark'];
+
+  function currentTheme() {
+    try { return localStorage.getItem('lw-theme') || 'system'; } catch (e) { return 'system'; }
+  }
+
+  function setTheme(next) {
+    try {
+      if (next === 'system') localStorage.removeItem('lw-theme');
+      else localStorage.setItem('lw-theme', next);
+    } catch (e) { /* private browsing; the choice lasts this page only */ }
+    if (next === 'system') document.documentElement.removeAttribute('data-theme');
+    else document.documentElement.setAttribute('data-theme', next);
+    var button = $('#theme-toggle');
+    if (button) button.textContent = next === 'system' ? 'Theme' : next.charAt(0).toUpperCase() + next.slice(1);
+    say('Theme set to ' + next);
+  }
+
+  /* ------------------------------------------------------------------ *
+   * start
+   * ------------------------------------------------------------------ */
+
+  function start() {
+    rack = $('#rack');
+    announcer = $('#announcer');
+    audio = $('#preview-audio');
+    more = $('#more');
+    bulk = $('#bulk');
+
+    watchCovers();
+    paintMore();
+
+    var island = $('#claim-stages');
+    if (island) {
+      try {
+        var parsed = JSON.parse(island.textContent);
+        stages = parsed.stages || {};
+        phaseOrder = parsed.order || [];
+      } catch (e) { /* the plate still shows the phase name the event carried */ }
+    }
+
+    document.addEventListener('click', function (e) {
+      if (!e.target.closest) return;
+
+      var button = e.target.closest('[data-preview]');
+      if (button) { e.preventDefault(); preview(button); return; }
+
+      /* Shift on the way in, read on the way out: the checkbox's own change
+         event carries no modifier, and a range is how selecting forty rows
+         stops being forty presses. */
+      if (e.target.closest('.pick') || e.target.closest('label.row__pick')) {
+        shiftHeld = e.shiftKey;
+      }
+
+      /* The row's own surface selects it. An 18px checkbox is a small target
+         for something the reader does forty times in a sitting, and the rest
+         of the row was doing nothing on click.
+
+         What the row can do instead is listed by name rather than by position:
+         it holds a link, three buttons, a menu, a checkbox in its own label
+         and a panel that opens under it, and every one of those already means
+         something else. The checkbox is driven rather than set directly, so a
+         click through the row picks up shift-range selection from the same
+         code path the checkbox itself uses. */
+      var pickable = e.target.closest('.row--pickable');
+      if (pickable &&
+          !e.target.closest('a, button, input, label, select, .menu, .row__detail')) {
+        /* A drag that ended up selecting a title is not a click on the row.
+           Toggling here would undo the selection and surprise the reader. */
+        if (String(window.getSelection() || '')) return;
+        var rowBox = pickable.querySelector('.pick');
+        if (rowBox) {
+          /* The box is toggled and the same handler called, rather than
+             clicked. A synthetic click reaches this listener again before the
+             browser gets round to toggling anything, and the second pass sees
+             an event carrying no shift key and clears the modifier the range
+             was about to be read with. */
+          shiftHeld = e.shiftKey;
+          rowBox.checked = !rowBox.checked;
+          onPickChange(rowBox);
+          return;
+        }
+      }
+
+      if (e.target.closest('#more-load')) {
+        e.preventDefault();
+        loadMore(false);
+        return;
+      }
+      if (e.target.closest('#filter-load')) { loadMore(true); return; }
+      if (e.target.closest('#select-all')) { selectAllLoaded(); return; }
+      if (e.target.closest('#bulk-clear')) { clearPicks(); say('Selection cleared'); return; }
+      if (e.target.closest('#bulk-arm')) { armBulk(); return; }
+      if (e.target.closest('#bulk-back')) {
+        showStage('pick');
+        var arm = $('#bulk-arm');
+        if (arm) arm.focus();
+        return;
+      }
+      if (e.target.closest('#bulk-go')) { fireBulk(false); return; }
+      if (e.target.closest('#bulk-stop')) { stopBulk(); return; }
+      if (e.target.closest('#bulk-done')) { dismissBulk(); return; }
+
+      if (e.target.closest('#newpill-show')) {
+        var ids = pending.slice();
+        pending = [];
+        showPill();
+        insertRows(ids);
+        return;
+      }
+      if (e.target.closest && e.target.closest('#filter-clear')) {
+        var filter = $('#filter');
+        if (filter) { filter.value = ''; applyFilter(''); filter.focus(); }
+        return;
+      }
+      if (e.target.closest && e.target.closest('#retry-now')) { connect(); return; }
+      if (e.target.closest && e.target.closest('#theme-toggle')) {
+        var at = THEMES.indexOf(currentTheme());
+        setTheme(THEMES[(at + 1) % THEMES.length]);
+      }
+    });
+
+    if (audio) audio.addEventListener('ended', stopPreview);
+
+    document.addEventListener('change', function (e) {
+      var box = e.target.closest ? e.target.closest('.pick') : null;
+      if (box) onPickChange(box);
+    });
+
+    if (bulk) {
+      var selectAll = $('#select-all');
+      /* Only offered once scripting has proved it can do something: with no
+         script behind it the button is a promise nothing keeps. */
+      if (selectAll && pickBoxes().length) selectAll.hidden = false;
+      var go = $('#bulk-go');
+      if (go) {
+        /* A key held down repeats. Every repeat after the first is the same
+           press, and none of them may spend anything. */
+        go.addEventListener('keydown', function (e) {
+          if (e.repeat && (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar')) {
+            e.preventDefault();
+          }
+        });
+      }
+    }
+
+    var filterInput = $('#filter');
+    if (filterInput) {
+      filterInput.addEventListener('input', function () { applyFilter(filterInput.value); });
+    }
+
+    $$('[data-autosubmit] select').forEach(function (select) {
+      select.addEventListener('change', function () { select.form.submit(); });
+    });
+
+    if (rack) {
+      rack.addEventListener('focusin', function (e) {
+        var row = e.target.closest('.row');
+        if (row) {
+          $$('.row[tabindex="0"]', rack).forEach(function (r) { if (r !== row) r.tabIndex = -1; });
+          row.tabIndex = 0;
+        }
+      });
+      var first = $('.row', rack);
+      if (first) first.tabIndex = 0;
+    }
+
+    document.addEventListener('keydown', onKey);
+
+    var stored = currentTheme();
+    if (stored !== 'system') setTheme(stored);
+
+    if (window.EventSource) connect();
+    registerWorker();
+  }
+
+  // Registered after the page is interactive, so the install never competes
+  // with the first render for bandwidth.
+  //
+  // `isSecureContext` is the whole story on a LAN: a worker is refused over
+  // plain http to anything but localhost, and with no worker the browser will
+  // not offer to install. Served over http://<host>:<port> this is simply a
+  // website, which is why the failure is logged rather than surfaced.
+  function registerWorker() {
+    if (!('serviceWorker' in navigator) || !window.isSecureContext) return;
+    window.addEventListener('load', function () {
+      navigator.serviceWorker.register('/sw.js').catch(function (err) {
+        console.warn('offline support unavailable:', err);
+      });
+    });
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', start);
+  } else {
+    start();
+  }
+})();

@@ -1,0 +1,156 @@
+{% import "macros/icons.html" as ic %}
+
+{#
+  Everything a row says below its own line: claim progress, a failure, or a
+  refusal. Rendered into `#detail-{id}`, which the live connection refetches on
+  its own so a result never has to repaint the whole row.
+#}
+
+{%- macro detail(t) -%}
+{%- if t.state == 'working' -%}
+  {{ claim(t) }}
+{%- elif t.refusal -%}
+  {{ refusal(t) }}
+{%- elif t.failure -%}
+  {{ failure(t) }}
+{%- endif -%}
+{%- endmacro -%}
+
+
+{#-
+  Five named stages rather than one spinner, because every stage fails
+  differently and the stage is the only part of the failure the user can act on.
+-#}
+{%- macro claim(t) -%}
+{% set phase = t.job.phase or PHASE_ORDER[0] %}
+{% set stage = CLAIM_STAGES.get(phase) %}
+{% set step = t.plate.step %}
+<div class="claim" data-claim="{{ t.id }}" data-phase="{{ phase }}"
+     data-title="{{ t.title }}" data-artist="{{ t.artist }}">
+  <div class="claim__line" data-claim-line>
+    {%- if stage -%}
+      {{ stage.line.format(store=(t.store_label or 'Qobuz')|title, title=t.title, artist=t.artist) }}
+    {%- else -%}
+      Working on {{ phase }}
+    {%- endif -%}
+    {%- if phase == 'download' %}, <span class="claim__bytes" data-claim-bytes></span>{% endif -%}
+  </div>
+  {#- Stage 4 is the only determinate one. The rest render a short segment
+     crossing slowly; never a barber pole, which vibrates. -#}
+  <div class="claim__rule" data-determinate="{{ 'true' if phase == 'download' else 'false' }}">
+    <div class="claim__fill" data-claim-fill
+         style="{% if phase == 'download' %}width:0%{% endif %}"></div>
+  </div>
+</div>
+{%- endmacro -%}
+
+
+{#-
+  The refusal.
+
+  This is the screen the identity layer exists for. On 2026-08-02 a claim
+  resolved "CHVRCHES - Lies" to a soundtrack single called "Such Great Heights
+  (From "Tell Me Lies Season 3")" and downloaded it. The correct behaviour on a
+  doubtful match is to refuse, say so, and show its work, and every requirement
+  below is one half of that sentence:
+
+    * "Nothing was downloaded" comes first, before any explanation. Whether
+      bytes landed is the only thing the user needs in the first second.
+    * The rejected candidate is printed verbatim and wrapped rather than
+      truncated. Reading the string is the diagnosis; an ellipsis hides it.
+    * Score and threshold are both shown. "Low confidence" teaches nothing.
+    * The override is worded as a claim the user is making, is never the primary
+      action, is never the default focus target, and arms before it fires.
+-#}
+{%- macro refusal(t) -%}
+{% set r = t.refusal %}
+<div class="refusal" role="group" aria-labelledby="refused-{{ t.id }}"
+     x-data="{ armed: false }">
+  <p class="refusal__head" id="refused-{{ t.id }}">Nothing was downloaded.</p>
+
+  <div class="refusal__body">
+    {%- if r.title -%}
+    The closest purchase in your {{ r.store|title or 'store' }} account was:
+    <code class="refusal__candidate">{{ r.title }}{% if r.artist %}
+{{ r.artist }}{% endif %}</code>
+    {%- else -%}
+    No purchase in your {{ r.store|title or 'store' }} account scored high enough to be
+    this track.
+    {%- endif -%}
+    <p>Confidence <span class="refusal__score">{{ r.score }} / {{ r.threshold }}</span>,
+      and a claim needs {{ r.threshold }}. This track is still on your want list.</p>
+  </div>
+
+  <div class="refusal__actions">
+    {#- First in the DOM, so it is where Tab lands and what a keyboard user
+        reaches without aiming. -#}
+    <button type="button" class="btn" data-variant="outline" data-primary
+            hx-post="{{ API.claim.format(id=t.id) }}" hx-swap="none">
+      Not it, keep waiting
+    </button>
+
+    <button type="button" class="btn" data-variant="override"
+            x-show="!armed"
+            @click="armed = true">
+      That is the right track, download it
+    </button>
+    <button type="button" class="btn" data-variant="override" data-armed="true"
+            x-show="armed" x-cloak
+            hx-post="{{ API.claim_confirm.format(id=t.id) }}" hx-swap="none"
+            @click="armed = false">
+      Confirm, download it
+    </button>
+
+    <span class="refusal__log">
+      {%- if r.reasons %}{{ r.reasons }}{% endif -%}
+    </span>
+  </div>
+
+  {%- if r.candidates %}
+  {#- Losing candidates matter: they separate "the right item was there and lost
+      to a better-scoring wrong one" from "the store never returned it". Those
+      two failures need completely different fixes. -#}
+  <details class="refusal__candidates">
+    <summary>{{ ic.icon('down', 12, 2) }} Everything considered ({{ r.candidates|length }})</summary>
+    <table>
+      <thead><tr><th>Score</th><th>Candidate</th><th>Gate</th></tr></thead>
+      <tbody>
+        {%- for c in r.candidates %}
+        <tr>
+          <td>{{ c.score if c.score is not none else '' }}</td>
+          <td>{{ c.title or c.candidate or '' }}{% if c.artist %} &middot; {{ c.artist }}{% endif %}</td>
+          <td>{{ c.gate_failed or '' }}</td>
+        </tr>
+        {%- endfor %}
+      </tbody>
+    </table>
+  </details>
+  {%- endif %}
+</div>
+{%- endmacro -%}
+
+
+{#-
+  A claim that broke. The row always stays: nothing leaves the want list
+  without a confirmed success, and a list that drops a track after a failed
+  claim is a list that has quietly told you that you own something you do not.
+-#}
+{%- macro failure(t) -%}
+{% set f = t.failure %}
+<div class="failure" role="group" aria-labelledby="failed-{{ t.id }}">
+  <div class="failure__stage" id="failed-{{ t.id }}">
+    {{ ic.icon('alert', 12, 2) }}
+    {{ (CLAIM_STAGES.get(f.phase or '', {}).get('label')) or 'CLAIM' }} FAILED
+  </div>
+  <p>{{ f.text }}</p>
+  <div class="failure__actions">
+    <button type="button" class="btn" data-variant="outline" data-size="sm" data-primary
+            hx-post="{{ API.claim.format(id=t.id) }}" hx-swap="none">
+      {{ ic.icon('refresh', 14, 2) }} Retry
+    </button>
+    {%- if f.link %}
+    <a class="btn" data-variant="ghost" data-size="sm" href="{{ f.link }}">{{ f.link_label }}</a>
+    {%- endif %}
+  </div>
+</div>
+{%- endmacro -%}

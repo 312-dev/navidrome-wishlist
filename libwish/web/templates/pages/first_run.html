@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% import "macros/icons.html" as ic %}
+
+{% block title %}Set up &middot; Library Wishlist{% endblock %}
+
+{% block content %}
+{# Numbered because this is a real sequence and not a decorative eyebrow: you
+   cannot buy anything before a source has given you something to buy. #}
+<div class="empty">
+  <p class="empty__head">First run</p>
+  <p class="empty__body">Nothing is connected yet. Three steps.</p>
+</div>
+
+<ol class="steps">
+  <li class="step">
+    <span class="step__n">1</span>
+    <span>
+      <span class="step__title">Where your loves come from</span>
+      <span class="step__sub">Last.fm, ListenBrainz, Navidrome, Deezer</span>
+    </span>
+    <a class="btn" href="/setup#sources">{{ ic.icon('link', 15, 2) }} Connect a source</a>
+  </li>
+  <li class="step">
+    <span class="step__n">2</span>
+    <span>
+      <span class="step__title">Where you buy</span>
+      <span class="step__sub">Qobuz, Bandcamp</span>
+    </span>
+    <a class="btn" data-variant="outline" href="/setup#stores">
+      {{ ic.icon('link', 15, 2) }} Connect a store
+    </a>
+  </li>
+  <li class="step">
+    <span class="step__n">3</span>
+    <span>
+      <span class="step__title">Where files land</span>
+      <span class="step__sub">Navidrome rescans after each claim</span>
+    </span>
+    <span class="step__value">{{ music_dir|default('/music') }}</span>
+  </li>
+</ol>
+{% endblock %}
