@@ -125,7 +125,12 @@ def track(track_id: int):
     row = _svc().tracks.get(track_id)
     if row is None:
         return jsonify({"error": "no such track"}), 404
-    return jsonify(row)
+    # `subtitle` alongside the row's own fields, for the Cookie Broker banner.
+    # That protocol describes an item as a title and a secondary line, and
+    # which of this app's columns is the secondary line is this app's business
+    # to say. Added rather than substituted: everything else reading this route
+    # wants the columns it already knows.
+    return jsonify({**dict(row), "subtitle": row["artist"]})
 
 
 @bp.post("/ignore/<int:track_id>")
@@ -348,6 +353,10 @@ def purchases(store_id: str):
                 "artist": item.artist,
                 "release_title": item.release_title,
                 "purchased_at": item.purchased_at,
+                # The broker protocol's secondary line. The two music fields
+                # above stay for this app's own screens, which have room to
+                # show a release as well as a performer.
+                "subtitle": " · ".join(x for x in (item.artist, item.release_title) if x),
             })
             if len(found) >= limit:
                 break
@@ -395,7 +404,12 @@ def claim_pick(track_id: int):
         return jsonify({"error": f"store {store_id!r} is not configured"}), 404
 
     title = (body.get("title") or request.values.get("title") or "").strip()
-    artist = (body.get("artist") or request.values.get("artist") or "").strip()
+    # `subtitle` is what the Cookie Broker protocol calls the secondary line;
+    # `artist` is what this app's own screens post. Both name the same thing
+    # here, and this is recorded only as the audit note of what the reader was
+    # actually looking at when they chose.
+    artist = (body.get("subtitle") or body.get("artist")
+              or request.values.get("artist") or "").strip()
 
     conn = svc.db()
     try:
@@ -751,12 +765,30 @@ def jobs():
     return jsonify(list(_svc().jobs.recent()))
 
 
+# What each claim phase means, in words for the person who just bought
+# something rather than for the queue. Sent with the job because the phases are
+# this app's own (CLAIM_PHASES in libwish/jobs.py) and a browser extension
+# shared by every app cannot be expected to know them; it shows this sentence
+# and falls back to "Working on it." when there is none.
+PHASE_TEXT = {
+    "session": "Checking your store session.",
+    "enumerate": "Looking through your purchases.",
+    "match": "Matching your purchase to this track.",
+    "download": "Downloading the file.",
+    "verify": "Checking the file is what it claims to be.",
+}
+
+
 @bp.get("/jobs/<int:job_id>")
 def job(job_id: int):
     row = _svc().jobs.get(job_id)
     if row is None:
         return jsonify({"error": "no such job"}), 404
-    return jsonify(row)
+    out = dict(row)
+    said = PHASE_TEXT.get(out.get("phase"))
+    if said:
+        out["phase_text"] = said
+    return jsonify(out)
 
 
 @bp.get("/status")
