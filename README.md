@@ -14,6 +14,11 @@ catalogue it rents you; buying a record pays the artist properly and leaves you
 with a file that keeps working when a licence lapses. Most people who would
 rather buy simply lose track of what they meant to buy. This is the list.
 
+| Wanted | Owned |
+|---|---|
+| [![The want list](docs/screenshots/wanted.png)](docs/screenshots/wanted.png) | [![What has landed](docs/screenshots/owned.png)](docs/screenshots/owned.png) |
+| Everything loved and still missing, grouped by artist so what you would buy together sits together. | The same rows once the file has landed, each stamped with the shop it came from and the day it arrived. |
+
 ## What it does
 
 - **Watches what you loved.** Last.fm and ListenBrainz, polled on a timer.
