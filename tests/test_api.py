@@ -339,13 +339,44 @@ class BuyLinks(Base):
         track_id = self.a_track("CHVRCHES", "Lies", bandcamp_url=url)
         response = self.client.get(f"/api/buy/{track_id}?store=bandcamp")
         self.assertEqual(response.status_code, 302)
-        self.assertEqual(response.headers["Location"], url)
+        self.assertEqual(response.headers["Location"], f"{url}#lw={track_id}")
 
     def test_the_stored_link_belongs_to_bandcamp_alone(self):
         """Another store's link is its own; the column names the one it came from."""
         self.svc.stores = {"qobuz": StubStore("qobuz", "Qobuz")}
         track_id = self.a_track("A", "b", bandcamp_url="https://a.bandcamp.com/track/x")
         self.assertFalse(self.link(track_id, store="qobuz")["direct"])
+
+
+class BuyFragment(Base):
+    """The `lw=<id>` marker the redirect carries, for the extension that reads
+    it back off the store's page with `URLSearchParams`.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.svc.stores = {"bandcamp": StubStore()}
+
+    def test_the_redirect_names_the_track_in_the_fragment(self):
+        track_id = self.a_track()
+        response = self.client.get(f"/api/buy/{track_id}?store=bandcamp")
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(response.headers["Location"].endswith(f"#lw={track_id}"))
+
+    def test_a_store_url_with_its_own_fragment_gets_the_marker_appended(self):
+        url = "https://chvrches.bandcamp.com/track/lies#player"
+        track_id = self.a_track("CHVRCHES", "Lies", bandcamp_url=url)
+        response = self.client.get(f"/api/buy/{track_id}?store=bandcamp")
+        self.assertEqual(response.headers["Location"], f"{url}&lw={track_id}")
+
+    def test_the_bare_link_list_carries_no_fragment(self):
+        # The marker is only for the redirect; the list is a page of JSON with
+        # nowhere for a fragment to go, and no store lookup runs to build one.
+        track_id = self.a_track()
+        response = self.client.get(f"/api/buy/{track_id}")
+        self.assertEqual(response.status_code, 200)
+        link = next(l for l in response.get_json()["links"] if l["store"] == "bandcamp")
+        self.assertNotIn("lw=", link["url"])
 
 
 class UnknownTracks(Base):
@@ -380,6 +411,30 @@ class WhichStore(Base):
         rows = self.rows("SELECT * FROM jobs WHERE kind='claim' AND track_id=?", (track_id,))
         self.assertEqual(len(rows), 1)
         return rows[0]
+
+    def refuse_at(self, track_id, store, score=10):
+        """Leave a track the way a real refusal does: a failed claim job
+        naming the store it tried, and the match_decision row the refusal
+        panel reads. Both are needed, the same way the live incident that
+        motivated this fix had both."""
+        import time
+        from libwish import identity, match
+
+        conn = self.svc.db()
+        try:
+            conn.execute(
+                "INSERT INTO jobs(kind, state, track_id, provider_id, created_at)"
+                " VALUES('claim','failed',?,?,?)",
+                (track_id, store, int(time.time())))
+            conn.execute(
+                "INSERT INTO match_decision(track_id, decided_at, phase, provider,"
+                " matcher_version, lexicon_hash, outcome, score, reasons,"
+                " query_json, candidates_considered)"
+                " VALUES(?,?,'claim',?,?,?,'refused',?,'[]','{}',0)",
+                (track_id, int(time.time()), store,
+                 getattr(match, "MATCHER_VERSION", "1"), identity.lexicon_hash(), score))
+        finally:
+            conn.close()
 
     def test_a_form_post_names_the_store_as_well_as_a_json_one(self):
         # htmx form-encodes by default, so this is what the page actually
@@ -424,6 +479,51 @@ class WhichStore(Base):
         # that can be bought can be selected for a bulk claim.
         self.assertTrue(row["selectable"])
 
+    def test_a_track_with_no_claim_yet_still_offers_every_store(self):
+        # The same fact as the test above, through the real query rather than
+        # a hand-built dict: a track no claim has ever touched must not pick
+        # up a store from the correlated subquery in repo.py.
+        track_id = self.a_track()
+        self.svc.stores = {"qobuz": StubStore("qobuz", "Qobuz"),
+                           "bandcamp": StubStore("bandcamp", "Bandcamp")}
+        row = self.svc.tracks.get(track_id)
+        self.assertIsNone(row["last_claim_store"])
+        with self.app.test_request_context("/"):
+            from libwish.web.views import view_track
+            decorated = view_track(row, "artist")
+        self.assertEqual([s["id"] for s in decorated["stores"]], ["bandcamp", "qobuz"])
+
+    def test_a_refused_row_carries_the_store_of_its_last_claim(self):
+        # The bug: a retry that named no store, because the row's assigned
+        # store was read off `chosen_source` (the loved-from platform, never
+        # a store) or a `store` column that does not exist. The fact is on
+        # the jobs table instead.
+        from libwish.web.views import _decorate
+
+        track_id = self.a_track()
+        self.svc.stores = {"qobuz": StubStore("qobuz", "Qobuz"),
+                           "bandcamp": StubStore("bandcamp", "Bandcamp")}
+        self.refuse_at(track_id, "qobuz")
+        with self.app.test_request_context("/"):
+            row = _decorate([self.svc.tracks.get(track_id)], "artist")[0]
+        self.assertEqual(row["state"], "refused")
+        self.assertEqual(row["store_id"], "qobuz")
+        # Refused at one store narrows the row to that store, same as a row
+        # the reader assigned by hand: it was refused at a particular shop,
+        # and that is where the retry has to go.
+        self.assertEqual([s["id"] for s in row["stores"]], ["qobuz"])
+
+    def test_the_retry_button_carries_the_store_it_was_refused_at(self):
+        track_id = self.a_track()
+        self.svc.stores = {"qobuz": StubStore("qobuz", "Qobuz"),
+                           "bandcamp": StubStore("bandcamp", "Bandcamp")}
+        self.refuse_at(track_id, "qobuz")
+        html = self.client.get(f"/ui/row/{track_id}").get_data(as_text=True)
+        # Alpine's `store` is seeded from the row's own scope, and the button
+        # sends it back on the retry the same way "I bought it" already did.
+        self.assertIn("store: 'qobuz'", html)
+        self.assertIn(':hx-vals="JSON.stringify({ store: store })"', html)
+
     def test_a_wanted_row_draws_no_plate_but_keeps_its_anchor(self):
         """Nothing is drawn, and the element the live connection needs stays.
 
@@ -447,6 +547,146 @@ class WhichStore(Base):
         self.svc.stores = {}
         html = self.client.get(f"/ui/plate/{track_id}").get_data(as_text=True)
         self.assertIn("NO STORE", html)
+
+
+class RefusalDismiss(Base):
+    """That a refusal can be cleared off the screen without erasing the
+    `match_decision` row it was read from, and that clearing one refusal never
+    hides a later one.
+    """
+
+    def refuse_at(self, track_id, store="qobuz", score=10, failed_job=False):
+        """Leave a track refused, the way a real claim does: a `match_decision`
+        row the refusal panel reads, and optionally a failed job alongside it
+        for the tests that care about the plain-failure fallback.
+        """
+        import time
+        from libwish import identity, match
+
+        conn = self.svc.db()
+        try:
+            if failed_job:
+                conn.execute(
+                    "INSERT INTO jobs(kind, state, track_id, provider_id, created_at)"
+                    " VALUES('claim','failed',?,?,?)",
+                    (track_id, store, int(time.time())))
+            conn.execute(
+                "INSERT INTO match_decision(track_id, decided_at, phase, provider,"
+                " matcher_version, lexicon_hash, outcome, score, reasons,"
+                " query_json, candidates_considered)"
+                " VALUES(?,?,'claim',?,?,?,'refused',?,'[]','{}',0)",
+                (track_id, int(time.time()), store,
+                 getattr(match, "MATCHER_VERSION", "1"), identity.lexicon_hash(), score))
+        finally:
+            conn.close()
+
+    def decisions(self, track_id):
+        return self.rows("SELECT * FROM match_decision WHERE track_id=? ORDER BY id", (track_id,))
+
+    def state_of(self, track_id):
+        from libwish.web.views import _decorate
+
+        with self.app.test_request_context("/"):
+            return _decorate([self.svc.tracks.get(track_id)], "artist")[0]
+
+    def test_dismissing_clears_the_refused_state(self):
+        track_id = self.a_track()
+        self.svc.stores = {"qobuz": StubStore("qobuz", "Qobuz")}
+        self.refuse_at(track_id)
+        self.assertEqual(self.state_of(track_id)["state"], "refused")
+
+        response = self.client.post(f"/api/refusal/{track_id}/dismiss")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["ok"])
+
+        self.assertEqual(self.state_of(track_id)["state"], "wanted")
+
+    def test_the_decision_row_survives_with_dismissed_at_set(self):
+        track_id = self.a_track()
+        self.refuse_at(track_id)
+        self.client.post(f"/api/refusal/{track_id}/dismiss")
+
+        rows = self.decisions(track_id)
+        self.assertEqual(len(rows), 1, "dismissing must not delete the audit row")
+        self.assertEqual(rows[0]["outcome"], "refused")
+        self.assertIsNotNone(rows[0]["dismissed_at"])
+
+    def test_a_later_refusal_shows_again(self):
+        """The naive fix, tightened to fail: hiding refusals for the track
+        rather than dismissing one decision would leave the row silently
+        refused forever the second time too.
+        """
+        from libwish.models import MATCH_AUTO_MIN
+
+        track_id = self.a_track()
+        self.svc.stores = {"qobuz": StubStore("qobuz", "Qobuz")}
+        self.refuse_at(track_id, score=10)
+        self.client.post(f"/api/refusal/{track_id}/dismiss")
+        self.assertEqual(self.state_of(track_id)["state"], "wanted")
+
+        self.refuse_at(track_id, score=20)  # a fresh claim, refused again
+        after = self.state_of(track_id)
+        self.assertEqual(after["state"], "refused")
+        self.assertEqual(after["plate"]["l2"], f"20 / {MATCH_AUTO_MIN}")
+
+        rows = self.decisions(track_id)
+        self.assertEqual(len(rows), 2)
+        self.assertIsNotNone(rows[0]["dismissed_at"], "the old decision stays dismissed")
+        self.assertIsNone(rows[1]["dismissed_at"], "the new one starts undismissed")
+
+    def test_dismissing_an_unknown_track_is_a_404(self):
+        response = self.client.post("/api/refusal/999999/dismiss")
+        self.assertEqual(response.status_code, 404)
+
+    def test_a_double_dismiss_is_not_an_error(self):
+        track_id = self.a_track()
+        self.refuse_at(track_id)
+        first = self.client.post(f"/api/refusal/{track_id}/dismiss")
+        second = self.client.post(f"/api/refusal/{track_id}/dismiss")
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        rows = self.decisions(track_id)
+        self.assertEqual(len(rows), 1, "a repeat dismiss must not touch an earlier decision")
+        self.assertIsNotNone(rows[0]["dismissed_at"])
+
+    def test_a_dismissed_refusal_lets_the_failure_panel_show(self):
+        # The watch-for case: dismissed_at must not just blank the panel, it
+        # has to fall through to the plain failure exactly as if the refusal
+        # had never been recorded.
+        track_id = self.a_track()
+        self.svc.stores = {"qobuz": StubStore("qobuz", "Qobuz")}
+        self.refuse_at(track_id, failed_job=True)
+        self.client.post(f"/api/refusal/{track_id}/dismiss")
+
+        row = self.state_of(track_id)
+        self.assertIsNone(row.get("refusal"))
+        self.assertIsNotNone(row.get("failure"))
+
+
+class BuyAnchorExtensionMarker(Base):
+    """`data-buy` is what the wishlist browser extension's click handler in
+    libwish.js keys off to send a plain click at the store in the same tab
+    instead of a new one. `target="_blank"` and `rel="noopener"` have to stay
+    too: they are the whole behaviour with no extension installed, and what a
+    modifier-click still gets even with one.
+    """
+
+    def test_the_single_store_button_carries_the_marker(self):
+        track_id = self.a_track()
+        self.svc.stores = {"bandcamp": StubStore()}
+        html = self.client.get(f"/ui/row/{track_id}").get_data(as_text=True)
+        self.assertEqual(html.count("data-buy"), 1)
+        self.assertIn('data-buy x-show="!opened" target="_blank" rel="noopener"', html)
+
+    def test_every_store_in_the_dropdown_carries_the_marker(self):
+        track_id = self.a_track()
+        self.svc.stores = {"qobuz": StubStore("qobuz", "Qobuz"),
+                           "bandcamp": StubStore("bandcamp", "Bandcamp")}
+        html = self.client.get(f"/ui/row/{track_id}").get_data(as_text=True)
+        self.assertEqual(html.count("data-buy"), 2)
+        self.assertEqual(html.count('class="menu__item" data-buy'), 2)
+        self.assertEqual(html.count('target="_blank"'), 2)
 
 
 class CookieSession(unittest.TestCase):
@@ -636,6 +876,160 @@ class Installable(Base):
                         (static / name).write_bytes(b"one")
                 self.assertEqual(views._asset_version(), before,
                                  "an unchanged deploy must not expire every cache")
+
+
+class PurchaseStore:
+    """A store the test controls the ownership and enumerate-ability of."""
+
+    def __init__(self, store_id="qobuz", name="Qobuz", *, enumerate_owned=True,
+                 inventory=None, authed=True):
+        from libwish.models import StoreCapabilities
+
+        self.id = store_id
+        self.name = name
+        self.capabilities = StoreCapabilities(
+            search=False, deep_link=True, enumerate_owned=enumerate_owned, download=True,
+            release_granular=False, async_prepare=False, formats=("flac",))
+        self.inventory = inventory if inventory is not None else []
+        self.authed = authed
+
+    def buy_url(self, q):
+        return "https://example.invalid/search"
+
+    def list_owned(self, since=None):
+        from libwish.errors import StoreAuthError
+
+        if not self.authed:
+            raise StoreAuthError("signed out", code="signed_out", provider_id=self.id)
+        return iter(self.inventory)
+
+
+class Purchases(Base):
+    def owned_item(self, key, title, artist, release=None, purchased_at=None):
+        from libwish.models import Identifiers, OwnedItem
+
+        return OwnedItem(store="qobuz", item_key=key, kind="track", artist=artist, title=title,
+                         release_title=release, parent_key=None, purchased_at=purchased_at,
+                         duration_s=None, track_number=None, formats=("flac",),
+                         ids=Identifiers(), raw={})
+
+    def test_it_lists_what_the_store_owns(self):
+        self.svc.stores = {"qobuz": PurchaseStore(inventory=[
+            self.owned_item("a", "Lies", "CHVRCHES", release="The Bones of What You Believe"),
+            self.owned_item("b", "Falling Down", "Lil Peep"),
+        ])}
+        response = self.client.get("/api/purchases/qobuz")
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertEqual(body["store"], "qobuz")
+        self.assertEqual([p["item_key"] for p in body["purchases"]], ["a", "b"])
+        self.assertEqual(body["purchases"][0]["title"], "Lies")
+        self.assertEqual(body["purchases"][0]["artist"], "CHVRCHES")
+        self.assertEqual(body["purchases"][0]["release_title"], "The Bones of What You Believe")
+
+    def test_an_unconfigured_store_is_404(self):
+        self.svc.stores = {}
+        response = self.client.get("/api/purchases/qobuz")
+        self.assertEqual(response.status_code, 404)
+        self.assertIn("error", response.get_json())
+
+    def test_a_store_that_cannot_enumerate_is_an_error_not_an_empty_list(self):
+        """"You own nothing" and "this shop cannot tell us" are different
+        facts, and only one of them is true of a store with no enumerate
+        capability at all."""
+        self.svc.stores = {"bandcamp": PurchaseStore("bandcamp", "Bandcamp",
+                                                      enumerate_owned=False)}
+        response = self.client.get("/api/purchases/bandcamp")
+        self.assertNotEqual(response.status_code, 200)
+        self.assertIn("error", response.get_json())
+
+    def test_a_dead_session_is_not_reported_as_owning_nothing(self):
+        self.svc.stores = {"qobuz": PurchaseStore(authed=False)}
+        response = self.client.get("/api/purchases/qobuz")
+        self.assertNotEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertIn("error", body)
+        self.assertNotIn("purchases", body)
+
+    def test_the_result_is_capped_the_same_way_other_listings_are(self):
+        from libwish.web.api import DEFAULT_LIMIT, MAX_LIMIT
+
+        self.svc.stores = {"qobuz": PurchaseStore(inventory=[
+            self.owned_item(str(n), f"Track {n}", "Artist") for n in range(MAX_LIMIT + 10)
+        ])}
+        self.assertEqual(len(self.client.get("/api/purchases/qobuz").get_json()["purchases"]),
+                         DEFAULT_LIMIT)
+        capped = self.client.get(f"/api/purchases/qobuz?limit={MAX_LIMIT + 50}")
+        self.assertEqual(len(capped.get_json()["purchases"]), MAX_LIMIT)
+        self.assertEqual(len(self.client.get("/api/purchases/qobuz?limit=2")
+                             .get_json()["purchases"]), 2)
+        self.assertEqual(self.client.get("/api/purchases/qobuz?limit=abc").status_code, 400)
+
+
+class Pick(Base):
+    def decisions(self, track_id):
+        return self.rows("SELECT * FROM match_decision WHERE track_id=?", (track_id,))
+
+    def test_picking_records_a_user_picked_decision_naming_the_purchase(self):
+        track_id = self.a_track("CHVRCHES", "Lies")
+        self.svc.stores = {"qobuz": StubStore("qobuz", "Qobuz")}
+        response = self.client.post(f"/api/claim/{track_id}/pick", json={
+            "store": "qobuz", "item_key": "abc123", "title": "Lies", "artist": "CHVRCHES",
+        })
+        self.assertEqual(response.status_code, 202)
+        body = response.get_json()
+        self.assertTrue(body["ok"])
+        self.assertTrue(body["picked"])
+        rows = self.decisions(track_id)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["outcome"], "user_picked")
+        self.assertNotEqual(rows[0]["outcome"], "user_confirmed")
+        self.assertEqual(rows[0]["provider"], "qobuz")
+        self.assertEqual(rows[0]["phase"], "pick")
+        self.assertIn("abc123", rows[0]["candidate_json"])
+        self.assertIn("Lies", rows[0]["candidate_json"])
+
+    def test_picking_enqueues_a_claim_carrying_the_store(self):
+        track_id = self.a_track("CHVRCHES", "Lies")
+        self.svc.stores = {"qobuz": StubStore("qobuz", "Qobuz")}
+        response = self.client.post(f"/api/claim/{track_id}/pick",
+                                    json={"store": "qobuz", "item_key": "abc123"})
+        job = self.svc.jobs.get(response.get_json()["job_id"])
+        self.assertEqual(job["kind"], "claim")
+        self.assertEqual(job["track_id"], track_id)
+        self.assertEqual(job["provider_id"], "qobuz")
+
+    def test_a_form_post_names_the_store_as_well_as_a_json_one(self):
+        track_id = self.a_track()
+        self.svc.stores = {"qobuz": StubStore("qobuz", "Qobuz")}
+        response = self.client.post(f"/api/claim/{track_id}/pick",
+                                    data={"store": "qobuz", "item_key": "x"})
+        self.assertEqual(response.status_code, 202)
+
+    def test_an_unknown_track_is_404(self):
+        response = self.client.post("/api/claim/999999/pick",
+                                    json={"store": "qobuz", "item_key": "x"})
+        self.assertEqual(response.status_code, 404)
+
+    def test_a_store_is_required(self):
+        track_id = self.a_track()
+        response = self.client.post(f"/api/claim/{track_id}/pick", json={"item_key": "x"})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(self.decisions(track_id), [])
+
+    def test_an_item_key_is_required(self):
+        track_id = self.a_track()
+        response = self.client.post(f"/api/claim/{track_id}/pick", json={"store": "qobuz"})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(self.decisions(track_id), [])
+
+    def test_an_unconfigured_store_is_404(self):
+        track_id = self.a_track()
+        self.svc.stores = {}
+        response = self.client.post(f"/api/claim/{track_id}/pick",
+                                    json={"store": "qobuz", "item_key": "x"})
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(self.decisions(track_id), [])
 
 
 if __name__ == "__main__":

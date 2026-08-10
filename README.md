@@ -28,7 +28,9 @@ rather buy simply lose track of what they meant to buy. This is the list.
 - **Refuses when it is not sure.** A download only happens when the purchase
   matches the track you wanted, on artist, title and length. Anything short of
   that is shown to you with the candidate it rejected and the score it gave,
-  and nothing is downloaded.
+  and nothing is downloaded. From there you can override the score, or point
+  at the exact purchase in your account yourself; either way the record says
+  it was your call, not the matcher's.
 
 It buys nothing on your behalf and it takes no payment details. You buy the
 record, in your own browser, from the shop. This finds it afterwards.

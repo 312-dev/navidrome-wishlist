@@ -17,7 +17,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from libwish.errors import MatchRefused, StoreAuthError, VerificationFailed
+from libwish.errors import LibwishError, MatchRefused, StoreAuthError, VerificationFailed
 from libwish.models import (
     DownloadResult, Identifiers, OwnedItem, SourcePage, StoreCapabilities,
     StoreHealth, TrackIds, LovedTrack,
@@ -125,6 +125,26 @@ class Base(unittest.TestCase):
                 " VALUES(?,?,?,?,?,?,'user_confirmed','','{}',0,?)",
                 (track_id, int(time.time()), "confirm", store_id,
                  getattr(match, "MATCHER_VERSION", "1"), identity.lexicon_hash(), store_id))
+        finally:
+            conn.close()
+
+    def pick(self, track_id, item_key, store_id="stub", title="", artist=""):
+        """Record the choice the interface writes when someone claims a
+        purchase by hand instead of disagreeing with a score."""
+        import json
+        import time
+        from libwish import identity, match
+        conn = self.svc.db()
+        try:
+            conn.execute(
+                "INSERT INTO match_decision(track_id, decided_at, phase, provider,"
+                " matcher_version, lexicon_hash, outcome, reasons, query_json,"
+                " candidate_json, candidates_considered, chosen_store_id)"
+                " VALUES(?,?,?,?,?,?,'user_picked','','{}',?,0,?)",
+                (track_id, int(time.time()), "pick", store_id,
+                 getattr(match, "MATCHER_VERSION", "1"), identity.lexicon_hash(),
+                 json.dumps({"item_key": item_key, "title": title, "artist": artist}),
+                 store_id))
         finally:
             conn.close()
 
@@ -272,6 +292,81 @@ class UserConfirmation(Base):
             conn.close()
         self.assertEqual(outcome, "accepted_after_confirmation",
                          "the audit must distinguish what the software chose from what a person did")
+
+
+class UserPick(Base):
+    """Pointing at one exact purchase is a distinct, auditable act, and one the
+    matcher never gets to score."""
+
+    def test_a_pick_bypasses_scoring_entirely(self):
+        """A confirmation still has to clear the confirm floor; a pick does
+        not, because nobody asked the matcher to judge it."""
+        track_id = self.a_track("CHVRCHES", "Lies")
+        store = StubStore([owned("Aphex Twin", "Windowlicker", "unrelated")])
+        self.pick(track_id, "unrelated")
+        self.run_claim(track_id, store)
+        self.assertEqual(store.downloaded, ["unrelated"])
+        self.assertEqual(self.svc.tracks.get(track_id)["status"], "purchased")
+
+    def test_a_pick_downloads_exactly_the_named_item_among_others(self):
+        track_id = self.a_track("CHVRCHES", "Lies")
+        store = StubStore([
+            owned("CHVRCHES", "Lies", "right", album="The Bones of What You Believe"),
+            owned("Aphex Twin", "Windowlicker", "wrong"),
+        ])
+        self.pick(track_id, "wrong")
+        self.run_claim(track_id, store)
+        self.assertEqual(store.downloaded, ["wrong"])
+
+    def test_a_missing_picked_item_fails_cleanly(self):
+        """The purchase named at pick time is gone by the time the job runs.
+        Nothing downloads, and the track is not silently dropped."""
+        track_id = self.a_track("CHVRCHES", "Lies")
+        store = StubStore([owned("CHVRCHES", "Lies", "right")])
+        self.pick(track_id, "gone")
+        with self.assertRaises(LibwishError):
+            self.run_claim(track_id, store)
+        self.assertEqual(store.downloaded, [])
+        self.assertEqual(self.svc.tracks.get(track_id)["status"], "queued")
+
+    def test_a_pick_is_spent_once(self):
+        track_id = self.a_track("CHVRCHES", "Lies")
+        self.pick(track_id, "a")
+        self.run_claim(track_id, StubStore([owned("Aphex Twin", "Windowlicker", "a")]))
+        self.svc.tracks.set_status(track_id, "queued")
+        second = StubStore([owned("Aphex Twin", "Windowlicker", "b")])
+        with self.assertRaises(MatchRefused):
+            self.run_claim(track_id, second)
+        self.assertEqual(second.downloaded, [],
+                         "one pick must not license every later claim on that track")
+
+    def test_the_pick_is_recorded_under_its_own_outcome_not_a_confirmation(self):
+        track_id = self.a_track("Lil Peep", "Falling Down")
+        self.pick(track_id, "a", title="Falling Down", artist="Lil Peep")
+        conn = self.svc.db()
+        try:
+            row = conn.execute(
+                "SELECT outcome FROM match_decision WHERE track_id=?"
+                " ORDER BY id DESC LIMIT 1", (track_id,)).fetchone()
+        finally:
+            conn.close()
+        self.assertEqual(row["outcome"], "user_picked")
+        self.assertNotEqual(row["outcome"], "user_confirmed",
+                            "a hand-picked purchase is a different act from disagreeing with a score")
+
+    def test_a_successful_pick_writes_a_second_row_so_the_spend_is_visible(self):
+        """Mirrors the confirm flow: the act (`user_picked`) and the pipeline's
+        own outcome (`downloaded_by_pick`) are both on the audit trail."""
+        track_id = self.a_track("Lil Peep", "Falling Down")
+        self.pick(track_id, "a")
+        self.run_claim(track_id, StubStore([owned("Lil Peep", "Falling Down", "a")]))
+        conn = self.svc.db()
+        try:
+            outcomes = [r["outcome"] for r in conn.execute(
+                "SELECT outcome FROM match_decision WHERE track_id=? ORDER BY id", (track_id,))]
+        finally:
+            conn.close()
+        self.assertEqual(outcomes, ["user_picked", "downloaded_by_pick"])
 
 
 class Endpoints(Base):

@@ -61,6 +61,15 @@
     * Score and threshold are both shown. "Low confidence" teaches nothing.
     * The override is worded as a claim the user is making, is never the primary
       action, is never the default focus target, and arms before it fires.
+
+  Below those actions sits a second way out: pointing at the exact purchase
+  instead of arguing with the score. It is collapsed by default, offers no
+  purchase until a click opens it, and asks for a second, separate confirm
+  before it claims anything, same as the override above does. A refusal here
+  is only ever reached once the matcher had purchases to score against (an
+  empty account refuses earlier, with its own message, before any candidate
+  exists to lose to), so nothing gates this panel on there being something to
+  pick from; there always is.
 -#}
 {%- macro refusal(t) -%}
 {% set r = t.refusal %}
@@ -83,9 +92,12 @@
 
   <div class="refusal__actions">
     {#- First in the DOM, so it is where Tab lands and what a keyboard user
-        reaches without aiming. -#}
+        reaches without aiming. This acknowledges the refusal and returns the
+        row to plain wanted; it does not retry the claim, so it takes no
+        store, and a later claim that gets refused again shows this panel
+        again. -#}
     <button type="button" class="btn" data-variant="outline" data-primary
-            hx-post="{{ API.claim.format(id=t.id) }}" hx-swap="none">
+            hx-post="{{ API.refusal_dismiss.format(id=t.id) }}" hx-swap="none">
       Not it, keep waiting
     </button>
 
@@ -105,6 +117,97 @@
       {%- if r.reasons %}{{ r.reasons }}{% endif -%}
     </span>
   </div>
+
+  {#- The hand-picker. Closed by default (no `open` attribute), so it costs
+      nothing until asked for, and the purchase list is not fetched until the
+      first time it opens. `store` is read off the row's own x-data, the same
+      value the actions above send back on a retry. -#}
+  <details class="refusal__picker"
+      x-data="{
+        loading: false, error: '', purchases: null, selected: null, sending: false,
+        load() {
+          if (this.purchases !== null || this.loading) return;
+          this.loading = true; this.error = '';
+          fetch('{{ API.purchases }}/' + encodeURIComponent(store),
+              { credentials: 'same-origin', headers: { 'X-Requested-With': 'libwish' } })
+            .then(function (res) {
+              return res.json().then(function (body) { return { ok: res.ok, body: body }; },
+                function () { return { ok: res.ok, body: null }; });
+            })
+            .then(function (answer) {
+              this.loading = false;
+              if (!answer.ok || !answer.body) {
+                this.error = (answer.body && answer.body.error) || 'Could not load your purchases.';
+                return;
+              }
+              this.purchases = answer.body.purchases || [];
+            }.bind(this))
+            .catch(function () {
+              this.loading = false;
+              this.error = 'Could not reach the server.';
+            }.bind(this));
+        },
+        meta(p) {
+          var bits = [];
+          if (p.release_title) bits.push(p.release_title);
+          if (p.purchased_at) bits.push(new Date(p.purchased_at * 1000).toLocaleDateString());
+          return bits.join(' &middot; ');
+        },
+        confirm() {
+          if (!this.selected || this.sending) return;
+          this.sending = true;
+          var picked = this.selected;
+          fetch('{{ API.claim_pick.format(id=t.id) }}', {
+            method: 'POST', credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'libwish' },
+            body: JSON.stringify({ store: store, item_key: picked.item_key,
+                                   title: picked.title, artist: picked.artist })
+          }).then(function (res) {
+            this.sending = false;
+            if (res.ok) { this.selected = null; return; }
+            return res.json().catch(function () { return null; }).then(function (body) {
+              this.error = (body && body.error) || 'The claim could not be started.';
+            }.bind(this));
+          }.bind(this)).catch(function () {
+            this.sending = false;
+            this.error = 'Could not reach the server.';
+          }.bind(this));
+        }
+      }"
+      @toggle="if ($el.open) load()">
+    <summary>{{ ic.icon('down', 12, 2) }} Pick the exact purchase</summary>
+    <div class="refusal__picker-body">
+      <p class="refusal__picker-note" x-show="loading" x-cloak>Looking through your purchases.</p>
+      <p class="refusal__picker-note" x-show="error" x-cloak x-text="error"></p>
+      <p class="refusal__picker-note" x-show="purchases && purchases.length === 0" x-cloak>
+        No purchases came back from {{ r.store|title or 'the store' }} just now.
+      </p>
+      <ul class="refusal__picker-list" x-show="purchases && purchases.length" x-cloak>
+        <template x-for="p in (purchases || [])" :key="p.item_key">
+          <li>
+            <button type="button" class="refusal__picker-item" @click="selected = p">
+              <span class="refusal__picker-title" x-text="p.title"></span>
+              <span class="refusal__picker-meta"
+                    x-text="p.artist + (meta(p) ? ' &middot; ' + meta(p) : '')"></span>
+            </button>
+          </li>
+        </template>
+      </ul>
+      <div class="refusal__picker-confirm" x-show="selected" x-cloak>
+        <p>Claim this as the track:</p>
+        <code class="refusal__candidate"
+              x-text="selected ? (selected.title + (selected.artist ? '\n' + selected.artist : '')) : ''"></code>
+        <button type="button" class="btn" data-variant="override" data-armed="true" data-size="sm"
+                :disabled="sending" @click="confirm()">
+          Confirm, download it
+        </button>
+        <button type="button" class="btn" data-variant="ghost" data-size="sm"
+                @click="selected = null">
+          Cancel
+        </button>
+      </div>
+    </div>
+  </details>
 
   {%- if r.candidates %}
   {#- Losing candidates matter: they separate "the right item was there and lost
@@ -144,8 +247,12 @@
   </div>
   <p>{{ f.text }}</p>
   <div class="failure__actions">
+    {#- Names the store the failed job ran at, off the row's own x-data this
+        panel is nested inside, so the retry goes back to that shop rather
+        than a claim naming none. -#}
     <button type="button" class="btn" data-variant="outline" data-size="sm" data-primary
-            hx-post="{{ API.claim.format(id=t.id) }}" hx-swap="none">
+            hx-post="{{ API.claim.format(id=t.id) }}" hx-swap="none"
+            :hx-vals="JSON.stringify({ store: store })">
       {{ ic.icon('refresh', 14, 2) }} Retry
     </button>
     {%- if f.link %}

@@ -111,8 +111,12 @@
               hx-post="{{ API.cancel.format(id=t.id) }}" hx-swap="none">Cancel</button>
 
     {%- elif t.state == 'refused' %}
+      {# A refused row is refused at a particular shop, so the retry has to
+         name that shop rather than leaving the claim endpoint to guess: with
+         more than one store configured it refuses a claim naming none. #}
       <button type="button" class="btn" data-variant="outline" data-primary data-act="claim"
-              hx-post="{{ API.claim.format(id=t.id) }}" hx-swap="none">
+              hx-post="{{ API.claim.format(id=t.id) }}" hx-swap="none"
+              :hx-vals="JSON.stringify({ store: store })">
         {{ ic.icon('refresh', 15, 2) }} Retry
       </button>
 
@@ -126,9 +130,17 @@
       </a>
 
     {%- else %}
-      {# Buy opens the shop in a new tab and the actions change to "I bought
-         it". No spinner: nothing is being awaited on the server, and a spinner
-         that spins forever teaches the user to distrust every other one.
+      {# Buy opens the shop in the same tab when the wishlist extension is on the
+         page, and a new one otherwise, and the actions then change to "I
+         bought it". No spinner: nothing is being awaited on the server, and a
+         spinner that spins forever teaches the user to distrust every other
+         one.
+
+         `data-buy` is what the delegated click handler in libwish.js keys off
+         to make that swap. `target="_blank"` and `rel="noopener"` stay on
+         every anchor regardless: they are the whole behaviour with no
+         extension installed, and they are what a modifier-click or a
+         middle-click still gets even with one.
 
          Whichever store was opened is remembered on the row, because the claim
          that follows has to look in the shop the purchase was actually made
@@ -136,7 +148,7 @@
          one is configured, which is what made "I bought it" fail on every row
          of a two-store install. #}
       {%- if t.stores|length == 1 %}
-      <a class="btn" data-primary x-show="!opened" target="_blank" rel="noopener"
+      <a class="btn" data-primary data-buy x-show="!opened" target="_blank" rel="noopener"
          href="{{ API.buy.format(id=t.id) }}?store={{ t.stores[0].id }}"
          @click="opened = true">
         Buy at {{ t.stores[0].name }} {{ ic.icon('arrow-up-right', 15, 2) }}
@@ -156,7 +168,7 @@
         <div class="menu__list" x-show="open" x-cloak role="menu"
              aria-label="Where to buy {{ t.title }}">
           {%- for s in t.stores %}
-          <a class="menu__item" role="menuitem" target="_blank" rel="noopener"
+          <a class="menu__item" data-buy role="menuitem" target="_blank" rel="noopener"
              href="{{ API.buy.format(id=t.id) }}?store={{ s.id }}"
              @click="open = false; store = '{{ s.id }}'; opened = true">
             {{ s.name }} {{ ic.icon('arrow-up-right', 14, 2) }}

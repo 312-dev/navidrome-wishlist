@@ -1168,6 +1168,36 @@
       }
     });
 
+    /* Buy opens in a new tab by default: nothing above touches `target` or
+       `rel` on the anchor, and that stays true here too. What changes is
+       whether the wishlist browser extension is on the page, stamped as
+       `data-lw-extension="1"` on <html> at document_start before this file
+       runs. With the stamp present the extension draws a "back to the
+       wishlist" bar on the store page, which makes navigating the same tab
+       the better move: the back button then hands the reader this exact page
+       out of bfcache, scroll position, a typed filter and every lazily loaded
+       row included. Without the stamp there is no bar to get back with, so
+       the new tab stands.
+
+       A reader who asks for a new tab on purpose, by a modifier-click or a
+       non-primary button, still gets one either way; this only redirects a
+       plain left click.
+
+       Delegated on document rather than bound to each anchor, because most
+       buy anchors do not exist yet when this file runs: they arrive by an
+       htmx swap or off the live event stream for as long as the tab stays
+       open, and a listener bound at load time would never see them. */
+    document.addEventListener('click', function (e) {
+      if (!e.target.closest) return;
+      var link = e.target.closest('a[data-buy]');
+      if (!link) return;
+      if (document.documentElement.dataset.lwExtension !== '1') return;
+      if (e.defaultPrevented) return;
+      if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+      e.preventDefault();
+      window.location.href = link.href;
+    });
+
     if (audio) audio.addEventListener('ended', stopPreview);
 
     document.addEventListener('change', function (e) {

@@ -145,13 +145,37 @@ class ClaimPipeline:
             raise MatchRefused(f"{store.name} reports no purchases at all.",
                                reason="empty_inventory")
 
-        progress("match", candidates=len(owned))
-        want = identity.build_identity(track["artist"], track["title"])
-        candidates = [identity.from_owned_item(item) for item in owned]
-        decision, index = self._decide(want, candidates, track, store.id)
-        item = owned[index]
-        log.info("matched", context={"track": track["id"], "item": item.item_key,
-                                     "score": getattr(decision, "score", None)})
+        # A hand-picked purchase skips scoring entirely rather than joining the
+        # candidate list: someone pointing at one exact item is stronger
+        # evidence than any score, and the confirm floor that gates
+        # `_user_confirmed` below has no bearing on an item nobody asked the
+        # matcher to judge in the first place.
+        picked_key = self._user_picked_item(track["id"])
+        if picked_key is not None:
+            item = next((i for i in owned if i.item_key == picked_key), None)
+            if item is None:
+                raise LibwishError(
+                    f"The purchase you picked is no longer in your {store.name} account.")
+            log.info("downloading a hand-picked purchase",
+                     context={"track": track["id"], "item": item.item_key})
+            # Written so the pick is spent once, the same guarantee
+            # `_user_confirmed` gives a confirmation: this row becomes the
+            # newest decision for the track, so a later, unrelated claim reads
+            # `_user_picked_item` as None instead of silently redownloading
+            # today's choice. It also gives the audit the item's real fields,
+            # in place of whatever strings the picker's request carried.
+            want = identity.build_identity(track["artist"], track["title"])
+            self._record(track["id"], want, item, None, "downloaded_by_pick",
+                         "downloaded the purchase picked by hand, not matched",
+                         len(owned), store.id)
+        else:
+            progress("match", candidates=len(owned))
+            want = identity.build_identity(track["artist"], track["title"])
+            candidates = [identity.from_owned_item(item) for item in owned]
+            decision, index = self._decide(want, candidates, track, store.id)
+            item = owned[index]
+            log.info("matched", context={"track": track["id"], "item": item.item_key,
+                                         "score": getattr(decision, "score", None)})
 
         progress("download", title=item.title, artist=item.artist)
         staging = self.svc.paths.staging_dir
@@ -263,6 +287,31 @@ class ClaimPipeline:
         finally:
             conn.close()
         return bool(row) and row["outcome"] == "user_confirmed"
+
+    def _user_picked_item(self, track_id: int) -> str | None:
+        """The item_key of a hand-picked purchase, or None.
+
+        Read off the newest decision for the track, same as `_user_confirmed`
+        and for the same reason: a pick is spent once, so a track refused again
+        later does not silently keep downloading whatever was picked before.
+        The identity itself travels in `candidate_json` rather than a new
+        column, because that is where a decision's winner already lives; a
+        pick has no scored candidate, but it has exactly this.
+        """
+        conn = self.svc.db()
+        try:
+            row = conn.execute(
+                "SELECT outcome, candidate_json FROM match_decision WHERE track_id=?"
+                " ORDER BY decided_at DESC, id DESC LIMIT 1", (track_id,)).fetchone()
+        finally:
+            conn.close()
+        if not row or row["outcome"] != "user_picked":
+            return None
+        try:
+            payload = json.loads(row["candidate_json"] or "{}")
+        except ValueError:
+            return None
+        return payload.get("item_key") or None
 
     def _record(self, track_id: int, want, candidate, score, outcome: str,
                 reasons: str, considered: int, store_id: str | None) -> None:

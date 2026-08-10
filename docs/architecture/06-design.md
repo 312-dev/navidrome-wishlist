@@ -589,14 +589,21 @@ Design requirements on this state, which are contractual rather than cosmetic:
 - "Nothing was downloaded" is stated explicitly, first, before the explanation.
 - The override is a **separate, explicitly worded button**, never the primary, never the
   default focus target, and never reachable by pressing Enter on the row.
+- A second override sits below the first: pointing at one exact purchase from the
+  account, rather than disagreeing with the score. It is collapsed until asked for and
+  logged under its own outcome, distinct from the score override, so the audit can say
+  which act put a given file in the library.
 - Every refusal writes a log line with the query, the candidate, the score and the
   threshold, and the UI links to it. Agent 4 owns the scoring; this view owns making a wrong
   decision diagnosable after the fact.
 
 ### The Buy button
 
-After Buy opens the store in a new tab, the plate enters state 4 `AWAITING` and the actions
-become `I bought it` (primary) plus `Cancel`, with `OPENED 14:02` on the plate's second line.
+After Buy opens the store, the plate enters state 4 `AWAITING` and the actions become
+`I bought it` (primary) plus `Cancel`, with `OPENED 14:02` on the plate's second line. The
+store opens in a new tab, unless the wishlist browser extension has stamped the page, in
+which case it navigates the same tab so the back button returns to this list exactly as it
+was.
 No spinner. Nothing is being awaited server side, and a spinner that spins forever is a lie
 about system state that costs the user trust in every other spinner in the app.
 

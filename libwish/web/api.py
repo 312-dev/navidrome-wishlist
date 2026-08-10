@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 from flask import (
     Blueprint, Response, current_app, jsonify, redirect, request, send_file,
@@ -293,6 +294,154 @@ def claim_confirm_bulk():
     return jsonify(payload), 202
 
 
+@bp.get("/purchases/<store_id>")
+def purchases(store_id: str):
+    """Recent purchases at one store, for the hand-picker on a refusal panel.
+
+    The matcher never even reaches `_decide` against an empty inventory (it
+    refuses with reason `empty_inventory` before building a candidate list at
+    all), so a track showing a refusal panel already implies the store had
+    something to enumerate. What has to be got right here instead is the two
+    ways this route can otherwise look like "you own nothing" without meaning
+    it: a store nobody configured, and a store whose session has died since
+    the claim that produced the refusal, which `list_owned` reports as
+    `StoreAuthError` rather than an empty iterator and this route must not
+    flatten that back into one.
+    """
+    svc = _svc()
+    store = (svc.stores or {}).get(store_id)
+    if store is None:
+        return jsonify({"error": f"store {store_id!r} is not configured"}), 404
+    if not store.capabilities.enumerate_owned:
+        return jsonify({"error": f"{store.name} cannot list what you own"}), 400
+    try:
+        limit = min(_count_arg("limit", DEFAULT_LIMIT), MAX_LIMIT)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    from ..errors import StoreAuthError
+
+    found = []
+    try:
+        for item in store.list_owned():
+            found.append({
+                "item_key": item.item_key,
+                "kind": item.kind,
+                "title": item.title,
+                "artist": item.artist,
+                "release_title": item.release_title,
+                "purchased_at": item.purchased_at,
+            })
+            if len(found) >= limit:
+                break
+    except StoreAuthError as exc:
+        # Not an empty list. An empty list here reads as "you own nothing",
+        # and a dead session is a different fact: the store is not answering
+        # for this account at all right now.
+        return jsonify({"error": str(exc), "code": "signed_out"}), 409
+
+    return jsonify({"store": store_id, "purchases": found})
+
+
+@bp.post("/claim/<int:track_id>/pick")
+def claim_pick(track_id: int):
+    """Claim one purchase the reader named directly, bypassing the matcher.
+
+    Distinct from `claim_confirm`: that route is someone disagreeing with a
+    close call the software already made, and still has to clear the confirm
+    floor. This one is someone choosing by hand from their own purchase list,
+    with no call of the matcher's to disagree with, so it is recorded under
+    its own outcome, `user_picked`, and the pipeline (`ClaimPipeline._decide`)
+    never scores it at all.
+
+    What gets written here is the identity the reader was shown by
+    `/api/purchases`, not a fresh lookup against the store: this route answers
+    as fast as every other action on this page does, and a purchase that
+    vanished between the two calls is exactly what the claim job's own
+    `list_owned` re-check exists to catch.
+    """
+    svc = _svc()
+    row = svc.tracks.get(track_id)
+    if row is None:
+        return jsonify({"error": "no such track"}), 404
+    body = request.get_json(silent=True) or {}
+    store_id = _store_arg()
+    item_key = (body.get("item_key") or request.values.get("item_key") or "").strip()
+    if not store_id:
+        return jsonify({"error": "a store is required to pick a purchase"}), 400
+    if not item_key:
+        return jsonify({"error": "item_key is required"}), 400
+    if store_id not in (svc.stores or {}):
+        return jsonify({"error": f"store {store_id!r} is not configured"}), 404
+
+    title = (body.get("title") or request.values.get("title") or "").strip()
+    artist = (body.get("artist") or request.values.get("artist") or "").strip()
+
+    conn = svc.db()
+    try:
+        from .. import identity, match
+
+        conn.execute(
+            "INSERT INTO match_decision(track_id, decided_at, phase, provider,"
+            " matcher_version, lexicon_hash, outcome, reasons, query_json,"
+            " candidate_json, candidates_considered, chosen_store_id)"
+            " VALUES(?,?,?,?,?,?,'user_picked',?,?,?,0,?)",
+            (track_id, int(time.time()), "pick", store_id,
+             getattr(match, "MATCHER_VERSION", "1"), identity.lexicon_hash(),
+             "picked by hand from the purchase list, not matched",
+             json.dumps({"artist": row["artist"], "title": row["title"]}),
+             json.dumps({"item_key": item_key, "title": title, "artist": artist}),
+             store_id),
+        )
+    finally:
+        conn.close()
+    job_id = svc.jobs.enqueue("claim", track_id=track_id, provider_id=store_id)
+    log.info("user picked a purchase by hand",
+             context={"track": track_id, "job": job_id, "item": item_key})
+    return jsonify({"ok": True, "job_id": job_id, "picked": True}), 202
+
+
+@bp.post("/refusal/<int:track_id>/dismiss")
+def refusal_dismiss(track_id: int):
+    """Mark the track's latest claim refusal acknowledged.
+
+    Never a delete. `match_decision` is the audit trail of what the software
+    decided about the reader's money, so clearing a refusal off the screen has
+    to mean marking that one decision read rather than erasing it. A later
+    claim writes its own row and is undismissed by construction, so refusing
+    the track again shows the refusal panel again: this endpoint acknowledges
+    one decision, not the track.
+
+    Marking an already-dismissed refusal dismissed again is a no-op, not an
+    error, because a reader clicking twice, or a stale tab replaying the same
+    click after a reload, is not a mistake worth surfacing.
+    """
+    svc = _svc()
+    if svc.tracks.get(track_id) is None:
+        return jsonify({"error": "no such track"}), 404
+    from .views import CLAIM_DECISION_PHASES
+
+    marks = ", ".join("?" for _ in CLAIM_DECISION_PHASES)
+    conn = svc.db()
+    try:
+        row = conn.execute(
+            "SELECT id FROM match_decision"
+            f" WHERE track_id=? AND outcome='refused' AND dismissed_at IS NULL"
+            f" AND phase IN ({marks})"
+            " ORDER BY decided_at DESC, id DESC LIMIT 1",
+            (track_id, *CLAIM_DECISION_PHASES),
+        ).fetchone()
+        if row is not None:
+            conn.execute(
+                "UPDATE match_decision SET dismissed_at=? WHERE id=?",
+                (int(time.time()), row["id"]),
+            )
+    finally:
+        conn.close()
+    svc.bus.publish("track.updated", id=track_id, status="queued")
+    return jsonify({"ok": True})
+
+
 @bp.post("/claim/<int:track_id>/cancel")
 def claim_cancel(track_id: int):
     """Stop a claim that has not started, and disown one that has.
@@ -396,6 +545,13 @@ def buy(track_id: int):
     silently. The row template always names one: it puts the choice in front of
     the reader as a menu and sends them to what they picked, which is why a
     link from a row lands in a shop rather than on this list.
+
+    The redirect carries `lw=<track_id>` in the URL fragment, for a browser
+    extension running on the store's page to read back with
+    `URLSearchParams`. A fragment rather than a query parameter, because a
+    fragment never leaves the browser: the shop's own server never sees it, so
+    nothing about the wishlist is disclosed to the store and the store has no
+    way to route on it.
     """
     svc = _svc()
     row = svc.tracks.get(track_id)
@@ -407,7 +563,7 @@ def buy(track_id: int):
         target = next((l for l in links if l["store"] == store_id), None)
         if target is None:
             return jsonify({"error": f"store {store_id!r} is not configured"}), 404
-        return redirect(target["url"])
+        return redirect(_with_track_fragment(target["url"], track_id))
     return jsonify({"track": track_id, "links": links})
 
 
@@ -453,6 +609,20 @@ def scan():
     rescan(svc.settings.rescan_cmd)
     svc.bus.publish("scan.requested", path=str(svc.settings.music_dir))
     return jsonify({"ok": True})
+
+
+def _with_track_fragment(url: str, track_id: int) -> str:
+    """`url`, with `lw=<track_id>` folded into its fragment.
+
+    Appended after `&` when the store URL already carries one, rather than
+    replaced, so a store that means its own fragment (routing, an anchor)
+    keeps meaning it; `URLSearchParams` on the reading end parses either
+    shape the same way.
+    """
+    parts = urlsplit(url)
+    marker = f"lw={track_id}"
+    fragment = f"{parts.fragment}&{marker}" if parts.fragment else marker
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, parts.query, fragment))
 
 
 def _buy_links(svc, row) -> list[dict]:

@@ -65,6 +65,12 @@ API = {
     "restore": "/api/restore/{id}",
     "claim": "/api/claim/{id}",
     "claim_confirm": "/api/claim/{id}/confirm",
+    "claim_pick": "/api/claim/{id}/pick",
+    "refusal_dismiss": "/api/refusal/{id}/dismiss",
+    # No {id}: the picker appends the store itself, the same way a buy link
+    # appends one to the shared `buy` route rather than the route templating
+    # it in.
+    "purchases": "/api/purchases",
     # One confirm for a whole selection. Separate from the per-track route
     # above because it takes a list and answers with a job per track.
     "claim_confirm_all": "/api/claim/confirm",
@@ -448,7 +454,12 @@ def view_track(row: dict, group_by: str = "artist") -> dict:
     t["origin"] = " · ".join(p for p in (source.replace("_", " "), clock) if p)
     t["day"] = _fmt_day(t.get("added_at"))
     t["duration"] = _fmt_duration(t.get("duration_ms"))
-    t["store_id"] = (t.get("store") or t.get("chosen_source") or "")
+    # The store a retry has to go back to, not the platform the love came
+    # from: `chosen_source` names Last.fm or ListenBrainz, and a track never
+    # gets a `store` column of its own, because nothing is assigned to a shop
+    # until a claim job actually names one. `last_claim_store` is that job's
+    # provider_id, read off the query in repo.py.
+    t["store_id"] = t.get("last_claim_store") or ""
     # Where this can be bought. A row assigned to one store offers that store
     # and nothing else; a row assigned to none offers every store configured,
     # because "nobody has picked yet" is not the same fact as "nowhere sells
@@ -614,12 +625,17 @@ def _payload(raw: str | None) -> dict:
 
 
 def refusal_for(track_id: int, conn: Any = None) -> dict | None:
-    """The last claim refusal recorded against a track, or None.
+    """The last undismissed claim refusal recorded against a track, or None.
 
     Only the phases in `CLAIM_DECISION_PHASES`, because this feeds a panel that
     states a purchase was refused and that nothing was downloaded. Enrichment
     records its own refusals in the same table against the same tracks, and one
     of those shown here would be a false claim about the reader's money.
+
+    A dismissed row is skipped rather than the newest row unconditionally,
+    which is what lets a reader clear a refusal off the screen and still have a
+    later claim refuse again: dismissal marks one decision acknowledged, not
+    the track immune to ever showing this panel again.
 
     The losing candidates live in `match_candidate`, keyed by decision, rather
     than in a column on the decision itself.
@@ -640,7 +656,8 @@ def refusal_for(track_id: int, conn: Any = None) -> dict | None:
             "SELECT id, score, candidate_json, reasons, matched_via,"
             " gate_failed, decided_at, provider"
             " FROM match_decision"
-            f" WHERE track_id=? AND outcome='refused' AND phase IN ({marks})"
+            f" WHERE track_id=? AND outcome='refused' AND dismissed_at IS NULL"
+            f" AND phase IN ({marks})"
             " ORDER BY decided_at DESC, id DESC LIMIT 1",
             (track_id, *CLAIM_DECISION_PHASES),
         ).fetchone()
@@ -784,7 +801,10 @@ def _decorate_rows(rows, group_by, live, broke, gaps, conn) -> list[dict]:
         elif row.get("status") == "queued":
             # A refusal outranks a plain failure: it is the state the user can
             # actually act on, and it carries the evidence the failure panel
-            # does not have.
+            # does not have. `refusal_for` already excludes a dismissed
+            # decision, so dismissing a refusal falls straight through to the
+            # failure panel below when there is a failed job to show, exactly
+            # as if the refusal had never been recorded.
             row["refusal"] = refusal_for(row["id"], conn)
             if not row["refusal"] and row["id"] in broke:
                 row["failure"] = failure_for(broke[row["id"]])

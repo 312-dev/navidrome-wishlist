@@ -1113,6 +1113,79 @@
     text-transform: uppercase;
   }
 
+  /* --- purchase picker ---------------------------------------------------
+     A second, deliberate way out of a refusal: point at the exact purchase
+     instead of arguing with a score. Same details/summary shape as
+     "Everything considered" above it, so opening it is always a keyboard
+     action and the list is never fetched until asked for. */
+  .refusal__picker {
+    margin-top: 10px;
+    font-size: var(--t-sub);
+  }
+  .refusal__picker summary {
+    cursor: pointer;
+    color: var(--fade);
+    list-style: none;
+  }
+  .refusal__picker summary::-webkit-details-marker {
+    display: none;
+  }
+  .refusal__picker-body {
+    margin-top: 8px;
+  }
+  .refusal__picker-note {
+    margin: 0;
+    color: var(--fade);
+  }
+  .refusal__picker-list {
+    display: flex;
+    flex-direction: column;
+    list-style: none;
+    max-height: 240px;
+    margin: 0;
+    padding: 0;
+    overflow-y: auto;
+    background: var(--sleeve);
+    border: 1px solid var(--rule-firm);
+    border-radius: var(--radius);
+  }
+  .refusal__picker-item {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    width: 100%;
+    padding: 8px 10px;
+    text-align: left;
+    color: var(--ink);
+    border-bottom: 1px solid var(--rule);
+  }
+  .refusal__picker-list li:last-child .refusal__picker-item {
+    border-bottom: none;
+  }
+  .refusal__picker-item:hover,
+  .refusal__picker-item:focus-visible {
+    background: var(--hover);
+  }
+  .refusal__picker-meta {
+    font-size: var(--t-micro);
+    color: var(--fade);
+  }
+  .refusal__picker-confirm {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin-top: 10px;
+  }
+  .refusal__picker-confirm p {
+    width: 100%;
+    margin: 0;
+  }
+  .refusal__picker-confirm .refusal__candidate {
+    width: 100%;
+  }
+
   /* --- failure ---------------------------------------------------------- */
 
   .failure {

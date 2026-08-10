@@ -29,6 +29,21 @@ TRACK_FIELDS = (
     "bandcamp_url",
 )
 
+# The store a retry has to go back to. There is no `store` column on `tracks`,
+# because a track is not assigned to a shop until something tries to buy it
+# there, so this is read off the jobs table instead: the most recent claim job
+# against the track that named a provider at all. A row that has never been
+# claimed gets NULL, which the reader treats as "no store picked yet" rather
+# than as this shop in particular, and a row refused or failed at a named
+# store stays pointed at that store rather than reopening the choice between
+# every one configured.
+LAST_CLAIM_STORE_SQL = (
+    "(SELECT provider_id FROM jobs"
+    " WHERE jobs.track_id = tracks.id AND jobs.kind = 'claim'"
+    "   AND jobs.provider_id IS NOT NULL"
+    " ORDER BY jobs.id DESC LIMIT 1) AS last_claim_store"
+)
+
 STATUSES = ("queued", "buying", "purchased", "ignored", "owned")
 
 # Which statuses each tab of the interface is made of.
@@ -86,7 +101,7 @@ class TrackRepo:
             conn.close()
 
     def queued(self, q: str = "") -> list[dict]:
-        cols = ", ".join(TRACK_FIELDS)
+        cols = ", ".join(TRACK_FIELDS) + ", " + LAST_CLAIM_STORE_SQL
         where, args = search_clause(q)
         return self._rows(
             f"SELECT {cols} FROM tracks WHERE status='queued'{where}"
@@ -94,7 +109,7 @@ class TrackRepo:
         )
 
     def ignored(self, q: str = "") -> list[dict]:
-        cols = ", ".join(TRACK_FIELDS)
+        cols = ", ".join(TRACK_FIELDS) + ", " + LAST_CLAIM_STORE_SQL
         where, args = search_clause(q)
         return self._rows(
             f"SELECT {cols} FROM tracks WHERE status='ignored'{where}"
@@ -102,7 +117,7 @@ class TrackRepo:
         )
 
     def owned(self, q: str = "") -> list[dict]:
-        cols = ", ".join(TRACK_FIELDS)
+        cols = ", ".join(TRACK_FIELDS) + ", " + LAST_CLAIM_STORE_SQL
         where, args = search_clause(q)
         return self._rows(
             f"SELECT {cols} FROM tracks WHERE status IN ('purchased','owned'){where}"
@@ -110,7 +125,7 @@ class TrackRepo:
         )
 
     def get(self, track_id: int) -> dict | None:
-        cols = ", ".join(TRACK_FIELDS)
+        cols = ", ".join(TRACK_FIELDS) + ", " + LAST_CLAIM_STORE_SQL
         rows = self._rows(f"SELECT {cols} FROM tracks WHERE id=?", (track_id,))
         return rows[0] if rows else None
 
