@@ -281,6 +281,24 @@ def _publish_broker_profile(app: Flask, sites: list[str]) -> None:
             "status": "/auth/status/{site}",
             "auth": "bearer",
         },
+        # The in-page banner: a bar on a shop's page after a purchase,
+        # offering to file it and to go back to the list. Declared here rather
+        # than configured in the extension, so connecting this app is one
+        # address and nothing else. The extension implements the behaviour and
+        # will not accept a capability it does not know; this only says which
+        # shops, which URL marker, and which paths on this server.
+        "integration": {
+            "capability": "purchase-return",
+            "marker": "lw",
+            "sites": sites,
+            "api": {
+                "item": "/api/track/{id}",
+                "job": "/api/jobs/{id}",
+                "claim": "/api/claim/{id}",
+                "pick": "/api/claim/{id}/pick",
+                "purchases": "/api/purchases/{store}",
+            },
+        },
         "sites": [
             {
                 "id": site,

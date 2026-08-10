@@ -119,6 +119,46 @@ class Published(Base):
         self.assertEqual(advertised, keepers & set(COOKIE_SITES))
 
 
+class Integration(Published):
+    """The banner the extension puts on a shop page after a purchase.
+
+    The app declares which shops and which paths; the extension owns what is
+    drawn and refuses a capability it does not implement. These assertions are
+    the extension's rules restated, for the same reason as the ones above.
+    """
+
+    def test_it_names_a_capability_rather_than_describing_one(self):
+        integration = self.profile()["integration"]
+        self.assertEqual(integration["capability"], "purchase-return")
+        # A profile that could carry code, markup or selectors would be a
+        # userscript in something that reads HttpOnly cookies.
+        for forbidden in ("js", "css", "script", "selector", "html"):
+            self.assertNotIn(forbidden, integration)
+
+    def test_the_marker_is_a_short_plain_key(self):
+        marker = self.profile()["integration"]["marker"]
+        self.assertRegex(marker, r"^[a-z][a-z0-9-]{0,15}$")
+
+    def test_every_endpoint_is_a_path_on_this_server(self):
+        api = self.profile()["integration"]["api"]
+        self.assertEqual(set(api), {"item", "job", "claim", "pick", "purchases"})
+        for name, path in api.items():
+            with self.subTest(endpoint=name):
+                self.assertTrue(path.startswith("/"), path)
+                self.assertNotIn("..", path)
+                expected = "{store}" if name == "purchases" else "{id}"
+                self.assertIn(expected, path)
+
+    def test_the_banner_is_only_offered_for_shops_this_profile_declares(self):
+        profile = self.profile()
+        declared = {s["id"] for s in profile["sites"]}
+        # The extension refuses an integration naming a shop the profile did
+        # not list, because the permission for that domain comes from the
+        # site list. Advertising one would be asking to run somewhere nobody
+        # agreed to.
+        self.assertTrue(set(profile["integration"]["sites"]) <= declared)
+
+
 class NotConfigured(Base):
     token = ""
 
