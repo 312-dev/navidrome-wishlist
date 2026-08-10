@@ -31,7 +31,7 @@ import json
 import re
 import unicodedata
 from pathlib import Path
-from typing import Iterator, Sequence
+from typing import Any, Iterator, Sequence
 
 from ..errors import StoreAuthError, StoreFormatUnavailable, TransientError
 from ..models import (
@@ -114,22 +114,31 @@ class QobuzStore:
         import time
 
         try:
-            page = self.http.get(DOWNLOADS_PATH).text()
+            res = self.http.get(DOWNLOADS_PATH)
         except Exception as exc:
             return StoreHealth(ok=False, authed=False, detail=f"cannot reach Qobuz: {exc}",
                                checked_at=int(time.time()), owned_count=None)
-        if self._is_signin(page):
+        if self._is_signin(res):
             return StoreHealth(ok=True, authed=False, detail="signed out",
                                checked_at=int(time.time()), owned_count=None)
-        count = len(self._entry_ids(page))
+        count = len(self._entry_ids(res.text()))
         return StoreHealth(ok=True, authed=True, detail="", checked_at=int(time.time()),
                            owned_count=count)
 
     @staticmethod
-    def _is_signin(page: str) -> bool:
-        # The signed-out response is a redirect to the sign-in form rather than
-        # an error status, so the status code alone cannot tell us.
-        return "/signin" in page[:3000]
+    def _is_signin(res: Any) -> bool:
+        """Whether this response is the sign-in form rather than the account.
+
+        Signed out, Qobuz redirects to the sign-in page and answers 200, so the
+        status cannot tell us and the address the response finally came from
+        is the fact that can. The body is the wrong place to look: on a real
+        signed-out page the first mention of the sign-in path is around 75,000
+        characters in, past any window worth scanning, which is why a signed
+        out session used to read as an account owning nothing.
+        """
+        from urllib.parse import urlsplit
+
+        return urlsplit(getattr(res, "url", "") or "").path.rstrip("/").endswith("/signin")
 
     # --- discovery ------------------------------------------------------
 
@@ -150,11 +159,11 @@ class QobuzStore:
     # --- ownership ------------------------------------------------------
 
     def list_owned(self, since: int | None = None) -> Iterator[OwnedItem]:
-        page = self.http.get(DOWNLOADS_PATH).text()
-        if self._is_signin(page):
+        res = self.http.get(DOWNLOADS_PATH)
+        if self._is_signin(res):
             raise StoreAuthError("Qobuz session is not signed in", code="signed_out",
                                  provider_id=self.id)
-        for entry_id, row_text in self._rows(page):
+        for entry_id, row_text in self._rows(res.text()):
             item = self._owned_item(entry_id, row_text)
             if item is not None:
                 yield item
