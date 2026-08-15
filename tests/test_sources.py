@@ -830,5 +830,58 @@ class LiveSmokeTest(unittest.TestCase):
         self.assertGreater(sources.cursor_after(page.cursor), 0)
 
 
+class TheExampleEnvNamesRealSettings(unittest.TestCase):
+    """Every LW_SOURCE_* in .env.example is a key some provider actually reads.
+
+    A wrong name here is worse than an absent one, and silently so. One
+    variable under a provider's prefix is enough for `configured_provider_ids`
+    to build that provider, so a misspelled key produces a source that starts,
+    polls, and raises for the name it wanted instead, every time, forever. The
+    file shipped `LW_SOURCE_LASTFM_USER` against a spec that reads `username`,
+    which is exactly that.
+
+    Asserted against the specs rather than a hand-kept list, so adding a
+    setting to a provider cannot leave the example describing the old one.
+    """
+
+    def documented(self):
+        from pathlib import Path
+        import re
+
+        text = (Path(__file__).resolve().parent.parent / ".env.example").read_text()
+        return re.findall(r"^#?(LW_SOURCE_([A-Z0-9]+)_([A-Z0-9_]+))=", text, re.M)
+
+    def test_the_example_documents_at_least_one_source(self):
+        # Without this the assertions below pass on an empty list, which is the
+        # shape this whole class would have if the regex ever stopped matching.
+        self.assertTrue(self.documented())
+
+    def test_every_documented_name_is_a_key_its_provider_reads(self):
+        from libwish import sources
+
+        for full, provider, key in self.documented():
+            with self.subTest(variable=full):
+                cls = sources.REGISTRY.get(provider.lower())
+                self.assertIsNotNone(cls, f"{full} names no registered source")
+                keys = {spec.key.upper() for spec in cls.info.config}
+                self.assertIn(key, keys,
+                              f"{full} is not one of {sorted(keys)}")
+
+    def test_every_required_setting_is_documented(self):
+        # The other direction: a required setting missing from the example is
+        # how someone configures a source that then cannot start.
+        from libwish import sources
+
+        documented = {full for full, _, _ in self.documented()}
+        for source_id in sources.ids():
+            info = sources.REGISTRY[source_id].info
+            for spec in info.config:
+                if not spec.required:
+                    continue
+                name = f"LW_SOURCE_{source_id.upper()}_{spec.key.upper()}"
+                with self.subTest(variable=name):
+                    self.assertIn(name, documented)
+
+
 if __name__ == "__main__":
     unittest.main()
