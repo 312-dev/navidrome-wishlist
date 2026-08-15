@@ -473,7 +473,7 @@ class WhichStore(Base):
         self.svc.stores = {"qobuz": StubStore("qobuz", "Qobuz"),
                            "bandcamp": StubStore("bandcamp", "Bandcamp")}
         with self.app.test_request_context("/"):
-            row = view_track({"id": 1, "artist": "A", "title": "t", "status": "queued"}, "artist")
+            row = view_track({"id": 1, "artist": "A", "title": "t", "status": "queued"})
         self.assertEqual([s["id"] for s in row["stores"]], ["bandcamp", "qobuz"])
         # Nothing assigned is not the same fact as nowhere to buy, and a row
         # that can be bought can be selected for a bulk claim.
@@ -490,7 +490,7 @@ class WhichStore(Base):
         self.assertIsNone(row["last_claim_store"])
         with self.app.test_request_context("/"):
             from libwish.web.views import view_track
-            decorated = view_track(row, "artist")
+            decorated = view_track(row)
         self.assertEqual([s["id"] for s in decorated["stores"]], ["bandcamp", "qobuz"])
 
     def test_a_refused_row_carries_the_store_of_its_last_claim(self):
@@ -505,7 +505,7 @@ class WhichStore(Base):
                            "bandcamp": StubStore("bandcamp", "Bandcamp")}
         self.refuse_at(track_id, "qobuz")
         with self.app.test_request_context("/"):
-            row = _decorate([self.svc.tracks.get(track_id)], "artist")[0]
+            row = _decorate([self.svc.tracks.get(track_id)])[0]
         self.assertEqual(row["state"], "refused")
         self.assertEqual(row["store_id"], "qobuz")
         # Refused at one store narrows the row to that store, same as a row
@@ -587,7 +587,7 @@ class RefusalDismiss(Base):
         from libwish.web.views import _decorate
 
         with self.app.test_request_context("/"):
-            return _decorate([self.svc.tracks.get(track_id)], "artist")[0]
+            return _decorate([self.svc.tracks.get(track_id)])[0]
 
     def test_dismissing_clears_the_refused_state(self):
         track_id = self.a_track()
@@ -692,7 +692,7 @@ class FailureDismiss(Base):
         from libwish.web.views import _decorate
 
         with self.app.test_request_context("/"):
-            return _decorate([self.svc.tracks.get(track_id)], "artist")[0]
+            return _decorate([self.svc.tracks.get(track_id)])[0]
 
     def test_dismissing_clears_the_failure_panel(self):
         track_id = self.a_track()
@@ -882,52 +882,57 @@ class TabCounts(Base):
                 self.assertEqual(counts[view], int(listed))
 
 
-class HowTheListIsGrouped(Base):
-    """The want list groups by date unless the request says otherwise.
+class TheListIsOneRunOfRowsNewestFirst(Base):
+    """No grouping, no headers, and the order is the repository's.
 
-    Worth asserting because the default is a single string read in four
-    places: the page route, the two fragment routes the client pages with, and
-    the fallback the client uses when the attribute is missing. Left
-    disagreeing, the first screenful groups one way and everything loaded after
-    it groups another, which reads as rows arriving in the wrong place rather
-    than as a setting.
+    Headers used to be the only thing that made the order visible, so with
+    them gone the order is what has to be asserted directly. Nothing between
+    the query and the page reorders anything, which is the whole of the rule:
+    newest first, in one run.
     """
 
-    def rack_group(self, path="/"):
+    def body(self, path="/"):
+        return self.client.get(path).get_data(as_text=True)
+
+    def ids_on(self, path="/"):
         import re
 
-        body = self.client.get(path).get_data(as_text=True)
-        found = re.search(r'id="rack"[^>]*data-group="([^"]*)"', body)
-        return found.group(1) if found else None
+        return [int(n) for n in re.findall(r'id="row-(\d+)"', self.body(path))]
 
-    def test_the_want_list_groups_by_date_by_default(self):
-        self.a_track()
-        self.assertEqual(self.rack_group(), "date")
+    def added_at(self, track_id):
+        return self.rows("SELECT added_at FROM tracks WHERE id=?", (track_id,))[0]["added_at"]
 
-    def test_asking_for_artist_still_gets_artist(self):
-        self.a_track()
-        self.assertEqual(self.rack_group("/?group=artist"), "artist")
+    def test_the_page_carries_no_headers_and_no_group_keys(self):
+        body = self.body()
+        for gone in ("group-head", "data-group", "data-group-key"):
+            with self.subTest(marker=gone):
+                self.assertNotIn(gone, body)
 
-    def test_an_unknown_grouping_falls_back_to_the_default(self):
-        self.a_track()
-        self.assertEqual(self.rack_group("/?group=sideways"), "date")
+    def test_the_rows_run_newest_first(self):
+        ids = self.ids_on()
+        self.assertGreater(len(ids), 1, "needs more than one row to have an order")
+        stamps = [self.added_at(i) for i in ids]
+        self.assertEqual(stamps, sorted(stamps, reverse=True))
 
-    def test_the_control_offers_the_current_grouping_as_selected(self):
-        self.a_track()
-        body = self.client.get("/").get_data(as_text=True)
-        # A select whose selected option disagrees with the rows underneath is
-        # a control that lies about the state it is showing.
-        self.assertRegex(body, r'<option value="date"[^>]*selected')
+    def test_a_stale_group_parameter_changes_nothing(self):
+        # An old bookmark or a link someone kept must not 500, and must not
+        # quietly produce a different list either.
+        self.assertEqual(self.ids_on("/?group=artist"), self.ids_on("/"))
 
-    def test_the_fragment_routes_agree_with_the_page(self):
-        # These are what "load more" and a live arrival call. A fragment
-        # grouped differently from the page inserts rows under headers that do
-        # not match the ones already on screen.
-        track_id = self.a_track()
-        for path in (f"/ui/rows?view=wanted&ids={track_id}", "/ui/page?view=wanted"):
-            with self.subTest(path=path):
-                body = self.client.get(path).get_data(as_text=True)
-                self.assertNotIn('data-group-key="CHVRCHES"', body)
+    def test_the_bar_offers_no_grouping_no_search_and_no_select_all(self):
+        body = self.body()
+        for gone in ('name="group"', 'name="q"', 'role="search"', 'id="select-all"',
+                     'id="filter"', 'id="filter-empty"'):
+            with self.subTest(control=gone):
+                self.assertNotIn(gone, body)
+
+    def test_the_next_window_is_headerless_too(self):
+        # What "load more" appends. A header here would land in a list that
+        # has none, and a group key would be read by a client that no longer
+        # knows what to do with one.
+        body = self.body("/ui/page?view=wanted&offset=0&limit=5")
+        self.assertIn('id="row-', body)
+        self.assertNotIn("group-head", body)
 
 
 class SyncSurvivesANavigation(Base):

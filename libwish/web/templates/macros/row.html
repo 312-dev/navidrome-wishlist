@@ -18,8 +18,6 @@
 <li class="row{% if view == 'wanted' and t.selectable %} row--pickable{% endif %}" id="row-{{ t.id }}"
     role="listitem" tabindex="-1"
     data-track="{{ t.id }}" data-state="{{ t.state }}"
-    data-group-key="{{ t.group_key }}"
-    data-search="{{ (t.title ~ ' ' ~ t.artist)|lower }}"
     x-data="{ opened: false, store: '{{ t.store_id }}' }">
 
   {# The selection column exists on every row of every view so the covers below
@@ -72,7 +70,9 @@
     <div class="row__title" title="{{ t.title }}">{{ t.title }}</div>
     <div class="row__artist" title="{{ t.artist }}">{{ t.artist }}</div>
     {%- if view == 'owned' %}
-      <div class="row__origin">bought {{ t.plate.l2r }}{% if t.plate.l2 %} via {{ t.plate.l2|title }}{% endif %}</div>
+      {# Nothing here. The plate beside it names the shop, and a second line
+         repeating that with a date attached was the pair this row was asked to
+         lose. #}
     {%- elif t.origin or t.duration or t.duration_unknown %}
       {# "runs" is doing real work: a bare 4:12 next to a track name reads as a
          clock time or a queue position as readily as a length, which is the
@@ -158,8 +158,9 @@
          different prices and in different formats, and choosing one on the
          reader's behalf is exactly the kind of decision this app exists not to
          make for them. #}
-      <div class="menu" x-show="!opened" x-data="{ open: false }"
-           @keydown.escape.window="open = false" @click.outside="open = false">
+      <div class="menu" x-show="!opened" x-data="{ open: false }" :data-open="open"
+           @keydown.escape.window="open = false" @click.outside="open = false"
+           @scroll.window="open = false">
         <button type="button" class="btn" data-primary
                 :aria-expanded="open ? 'true' : 'false'" aria-haspopup="true"
                 @click="open = !open">
@@ -199,18 +200,7 @@
 {%- endmacro -%}
 
 
-{#- One sticky group header. Shared by the first page, every later page and the
-    owned view, so a header cut by the server and one appended by the browser
-    cannot drift apart. `n` is the size of the whole group, not of the part
-    loaded so far, so a header never contradicts itself when more rows arrive
-    underneath it. -#}
-{%- macro group_head(g) -%}
-<li class="group-head" role="presentation" data-group="{{ g.key }}">
-  <span>{{ g.key }}</span>
-  <span class="group-head__count" data-group-count>{{ g.n }}</span>
-  <span class="group-head__rule"></span>
-</li>
-{%- endmacro -%}
+
 
 
 {#- One ignored track. Smaller, quieter, and restorable in one click. -#}

@@ -636,11 +636,20 @@ class Search(Base):
         # An artist that folds to nothing must not empty the screen either.
         self.assertEqual(len(self.svc.tracks.queued("!!!")), len(self.svc.tracks.queued()))
 
-    def test_a_search_is_a_linkable_url(self):
-        response = self.client.get("/?q=chvrches")
-        self.assertEqual(response.status_code, 200)
-        self.assertIn(b'value="chvrches"', response.get_data(),
-                      "the box must come back filled in, or the URL is not shareable")
+    def test_a_query_in_the_url_still_narrows_the_list(self):
+        # The box is gone from the bar, but the query behind it is not: ?q=
+        # remains a working, linkable URL and the JSON API pages with the same
+        # clause. Asserted by counting rows rather than by anything on screen,
+        # since there is no longer a control to echo the term back into.
+        import re
+
+        def rows(path):
+            body = self.client.get(path).get_data(as_text=True)
+            return re.findall(r'id="row-(\d+)"', body)
+
+        everything, hits = rows("/"), rows("/?q=chvrches")
+        self.assertTrue(hits, "a query that matches must still return its rows")
+        self.assertLess(len(hits), len(everything))
 
 
 class JobProgress(Base):

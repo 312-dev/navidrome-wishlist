@@ -115,20 +115,12 @@
     note.hidden = !text;
   }
 
-  /* Fold an arriving window into the rack. A group can straddle the boundary
-     between two windows, so a header for the group already open at the bottom
-     of the page is dropped rather than repeated. */
+  /* Fold an arriving window into the rack. A row the page already holds is
+     dropped by id, which is what keeps a window that overlaps the last one
+     from showing anything twice. */
   function appendWindow(holder) {
-    var tail = rack.lastElementChild;
-    var openGroup = '';
-    while (tail) {
-      if (tail.classList.contains('group-head')) { openGroup = tail.dataset.group || ''; break; }
-      if (tail.classList.contains('row')) { openGroup = tail.dataset.groupKey || ''; break; }
-      tail = tail.previousElementSibling;
-    }
     var added = 0;
     Array.prototype.slice.call(holder.children).forEach(function (node) {
-      if (node.classList.contains('group-head') && node.dataset.group === openGroup) return;
       if (node.id && document.getElementById(node.id)) return;
       rack.appendChild(node);
       if (node.classList.contains('row')) added += 1;
@@ -148,16 +140,9 @@
     if (shown) shown.textContent = String(offset);
     if (label) label.textContent = 'Load ' + Math.min(step, left) + ' more';
     if (link) {
-      link.href = '/?group=' + encodeURIComponent(more.dataset.group || 'date') +
-                  '&show=' + (offset + step);
+      link.href = '/?show=' + (offset + step);
     }
     more.hidden = left === 0;
-    var hint = $('#filter-more');
-    var hintN = $('#filter-more-n');
-    var loadRest = $('#filter-load');
-    if (hint) hint.hidden = left === 0;
-    if (hintN) hintN.textContent = String(left);
-    if (loadRest) loadRest.hidden = left === 0;
   }
 
   /* Rows append below everything on screen, which is why this needs no scroll
@@ -172,7 +157,6 @@
     more.dataset.busy = 'true';
     moreNote('');
     var url = '/ui/page?view=' + encodeURIComponent(rack.dataset.view || 'wanted') +
-              '&group=' + encodeURIComponent(more.dataset.group || 'date') +
               '&offset=' + offset + '&limit=' + limit;
     return fragment(url).then(function (html) {
       more.dataset.busy = 'false';
@@ -189,10 +173,6 @@
       sweepCovers(rack);
       syncPicks();
       if (window.htmx) window.htmx.process(rack);
-      /* Rows that land while a filter is on are held to the same filter, so
-         the count under the box keeps matching what is on screen. */
-      var filter = $('#filter');
-      if (filter && filter.value) applyFilter(filter.value);
       say(added + (added === 1 ? ' more track loaded, ' : ' more tracks loaded, ') +
           more.dataset.offset + ' of ' + total + ' on screen');
     });
@@ -222,10 +202,10 @@
      on the Owned tab: it is the first purchase anyone ever files, landing on
      a page that still says nothing has been claimed yet.
 
-     The empty block carries the view and grouping the rack would have had, so
-     it can be exchanged for one rather than having those strings written a
-     second time here. Returns null where there is no rack and nothing
-     standing in for one, which is the first-run page. */
+     The empty block carries the view the rack would have had, so it can be
+     exchanged for one rather than having that string written a second time
+     here. Returns null where there is no rack and nothing standing in for
+     one, which is the first-run page. */
   /* Which list this page is, whether or not it has a rack yet. Read-only on
      purpose: deciding that an event does not belong here must not cost the
      empty state its message. */
@@ -245,42 +225,15 @@
     list.id = 'rack';
     list.setAttribute('role', 'list');
     list.dataset.view = empty.dataset.view;
-    if (empty.dataset.group) list.dataset.group = empty.dataset.group;
     empty.parentNode.replaceChild(list, empty);
     rack = list;
     return rack;
   }
 
-  function groupHeadFor(key, label) {
-    var head = rack.querySelector('.group-head[data-group="' + CSS.escape(key) + '"]');
-    if (head) return head;
-    head = document.createElement('li');
-    head.className = 'group-head';
-    head.setAttribute('role', 'presentation');
-    head.setAttribute('data-group', key);
-    head.innerHTML = '<span></span><span class="group-head__count" data-group-count>0</span>' +
-                     '<span class="group-head__rule"></span>';
-    head.firstChild.textContent = label || key;
-    rack.insertBefore(head, rack.firstChild);
-    return head;
-  }
-
-  function bumpGroupCount(head, delta) {
-    var el = head.querySelector('[data-group-count]');
-    if (el) el.textContent = String((parseInt(el.textContent, 10) || 0) + delta);
-  }
-
-  /* `announce` is what the live region is told, as a function of how many rows
-     actually landed. It is a parameter because the same insertion serves a new
-     love arriving on Wanted and a purchase landing on Owned, and calling the
-     second one a new love would be a plain lie to the only reader who cannot
-     see the screen. */
   function insertRows(ids, announce) {
     if (!rack || !ids.length) return Promise.resolve();
     var view = rack.dataset.view || 'wanted';
-    var group = rack.dataset.group || 'date';
     var url = '/ui/rows?view=' + encodeURIComponent(view) +
-              '&group=' + encodeURIComponent(group) +
               '&ids=' + ids.join(',');
     return fragment(url).then(function (html) {
       if (!html) return;
@@ -290,10 +243,9 @@
       preservingScroll(function () {
         rows.forEach(function (row) {
           if (document.getElementById(row.id)) return;
-          var key = row.dataset.groupKey || '';
-          var head = groupHeadFor(key, key);
-          head.parentNode.insertBefore(row, head.nextSibling);
-          bumpGroupCount(head, 1);
+          /* The top, because the list is newest first and an arrival is the
+             newest thing in it. */
+          rack.insertBefore(row, rack.firstChild);
           markNew(row);
         });
       });
@@ -337,11 +289,8 @@
   function onTrackRemoved(data) {
     var row = document.getElementById('row-' + data.id);
     if (!row) return;
-    var head = row.previousElementSibling;
-    while (head && !head.classList.contains('group-head')) head = head.previousElementSibling;
     var drop = function () {
       preservingScroll(function () {
-        if (head) bumpGroupCount(head, -1);
         row.remove();
       });
       /* A row that left the list cannot be part of a confirm, and the count
@@ -612,18 +561,6 @@
     });
     picked = live;
     paintBulk();
-  }
-
-  /* Everything the reader can currently see, filtered rows excluded: a
-     selection that quietly included rows hidden behind a filter would be a
-     count nobody could check. */
-  function selectAllLoaded() {
-    pickBoxes().forEach(function (box) {
-      var row = box.closest('.row');
-      if (row && !row.hidden) setPicked(box, true, true);
-    });
-    paintBulk();
-    say(pickCount() + ' selected');
   }
 
   function onPickChange(box) {
@@ -997,36 +934,6 @@
   }
 
   /* ------------------------------------------------------------------ *
-   * filter
-   * ------------------------------------------------------------------ */
-
-  function applyFilter(term) {
-    if (!rack) return;
-    var needle = term.trim().toLowerCase();
-    var shown = 0;
-    $$('.group-head', rack).forEach(function (head) {
-      var n = 0;
-      var node = head.nextElementSibling;
-      while (node && !node.classList.contains('group-head')) {
-        var hit = !needle || (node.dataset.search || '').indexOf(needle) !== -1;
-        node.hidden = !hit;
-        if (hit) { n += 1; shown += 1; }
-        node = node.nextElementSibling;
-      }
-      head.hidden = n === 0;
-      var count = head.querySelector('[data-group-count]');
-      if (count) count.textContent = String(n);
-    });
-    var empty = $('#filter-empty');
-    if (empty) {
-      empty.hidden = shown !== 0 || !needle;
-      var echo = $('#filter-echo');
-      if (echo) echo.textContent = needle;
-    }
-    if (needle) say(shown + (shown === 1 ? ' track matches' : ' tracks match'));
-  }
-
-  /* ------------------------------------------------------------------ *
    * keyboard
    * ------------------------------------------------------------------ */
 
@@ -1050,12 +957,6 @@
   }
 
   function onKey(e) {
-    var filter = $('#filter');
-
-    if (e.key === '/' && !typing(e.target)) {
-      if (filter) { e.preventDefault(); filter.focus(); filter.select(); }
-      return;
-    }
     if (e.key === 'Escape') {
       /* Backing out of the confirm comes first. It is the only one of these
          with money behind it, and it is the one a reader reaches for. */
@@ -1064,12 +965,6 @@
         var arm = $('#bulk-arm');
         if (arm) arm.focus();
         say('Confirm cancelled. The selection is still there.');
-        return;
-      }
-      if (filter && (document.activeElement === filter || filter.value)) {
-        filter.value = '';
-        applyFilter('');
-        filter.blur();
         return;
       }
       if (pickCount()) {
@@ -1127,28 +1022,6 @@
       var ignore = row.querySelector('[data-act="ignore"]');
       if (ignore) { e.preventDefault(); ignore.click(); }
     }
-  }
-
-  /* ------------------------------------------------------------------ *
-   * theme
-   * ------------------------------------------------------------------ */
-
-  var THEMES = ['system', 'light', 'dark'];
-
-  function currentTheme() {
-    try { return localStorage.getItem('lw-theme') || 'system'; } catch (e) { return 'system'; }
-  }
-
-  function setTheme(next) {
-    try {
-      if (next === 'system') localStorage.removeItem('lw-theme');
-      else localStorage.setItem('lw-theme', next);
-    } catch (e) { /* private browsing; the choice lasts this page only */ }
-    if (next === 'system') document.documentElement.removeAttribute('data-theme');
-    else document.documentElement.setAttribute('data-theme', next);
-    var button = $('#theme-toggle');
-    if (button) button.textContent = next === 'system' ? 'Theme' : next.charAt(0).toUpperCase() + next.slice(1);
-    say('Theme set to ' + next);
   }
 
   /* ------------------------------------------------------------------ *
@@ -1332,8 +1205,6 @@
         loadMore(false);
         return;
       }
-      if (e.target.closest('#filter-load')) { loadMore(true); return; }
-      if (e.target.closest('#select-all')) { selectAllLoaded(); return; }
       if (e.target.closest('#bulk-clear')) { clearPicks(); say('Selection cleared'); return; }
       if (e.target.closest('#bulk-arm')) { armBulk(); return; }
       if (e.target.closest('#bulk-back')) {
@@ -1353,16 +1224,7 @@
         insertRows(ids);
         return;
       }
-      if (e.target.closest && e.target.closest('#filter-clear')) {
-        var filter = $('#filter');
-        if (filter) { filter.value = ''; applyFilter(''); filter.focus(); }
-        return;
-      }
       if (e.target.closest && e.target.closest('#retry-now')) { connect(); return; }
-      if (e.target.closest && e.target.closest('#theme-toggle')) {
-        var at = THEMES.indexOf(currentTheme());
-        setTheme(THEMES[(at + 1) % THEMES.length]);
-      }
     });
 
     /* Buy opens in a new tab by default: nothing above touches `target` or
@@ -1372,8 +1234,8 @@
        runs. With the stamp present the extension draws a "back to the
        wishlist" bar on the store page, which makes navigating the same tab
        the better move: the back button then hands the reader this exact page
-       out of bfcache, scroll position, a typed filter and every lazily loaded
-       row included. Without the stamp there is no bar to get back with, so
+       out of bfcache, scroll position and every lazily loaded row
+       included. Without the stamp there is no bar to get back with, so
        the new tab stands.
 
        A reader who asks for a new tab on purpose, by a modifier-click or a
@@ -1403,10 +1265,6 @@
     });
 
     if (bulk) {
-      var selectAll = $('#select-all');
-      /* Only offered once scripting has proved it can do something: with no
-         script behind it the button is a promise nothing keeps. */
-      if (selectAll && pickBoxes().length) selectAll.hidden = false;
       var go = $('#bulk-go');
       if (go) {
         /* A key held down repeats. Every repeat after the first is the same
@@ -1418,15 +1276,6 @@
         });
       }
     }
-
-    var filterInput = $('#filter');
-    if (filterInput) {
-      filterInput.addEventListener('input', function () { applyFilter(filterInput.value); });
-    }
-
-    $$('[data-autosubmit] select').forEach(function (select) {
-      select.addEventListener('change', function () { select.form.submit(); });
-    });
 
     if (rack) {
       rack.addEventListener('focusin', function (e) {
@@ -1442,8 +1291,6 @@
 
     document.addEventListener('keydown', onKey);
 
-    var stored = currentTheme();
-    if (stored !== 'system') setTheme(stored);
 
     if (window.EventSource) connect();
     registerWorker();

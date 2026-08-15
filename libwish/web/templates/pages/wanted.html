@@ -4,45 +4,13 @@
 
 {% block title %}Wanted &middot; Library Wishlist{% endblock %}
 
-{% block controls %}
-<form method="get" action="/" class="bar__group" data-autosubmit>
-  <label class="label sr-only-live" for="group">Group by</label>
-  {# Date leads, matching the default in `_group_arg`, which is where the
-     reasoning for it lives. Artist is the better read when the question is
-     what to buy rather than what arrived, since it puts a release's tracks
-     together, so it stays one press away. #}
-  <select class="select field-sm" id="group" name="group">
-    <option value="date" {% if group_by == 'date' %}selected{% endif %}>group: date</option>
-    <option value="artist" {% if group_by == 'artist' %}selected{% endif %}>group: artist</option>
-  </select>
-  <noscript><button class="btn" data-size="sm" type="submit">Apply</button></noscript>
-</form>
-{# Selecting works by keyboard and pointer on the rows themselves; this only
-   saves the sixty presses that selecting a whole page would otherwise cost, so
-   it appears once scripting has confirmed it can do anything. #}
-<button type="button" class="btn" data-variant="ghost" data-size="sm" id="select-all" hidden>
-  Select all loaded
-</button>
-{# A real GET form, so searching works with scripting off and a result is a
-   linkable URL. The script intercepts submit and swaps the rack in place. #}
-<form class="search" id="search" method="get" action="/" role="search">
-  <input type="hidden" name="group" value="{{ group_by }}">
-  <label class="label sr-only-live" for="filter">Search your want list</label>
-  <input class="input field-sm" id="filter" name="q" type="search" placeholder="search"
-         value="{{ q }}" autocomplete="off" aria-controls="rack" aria-describedby="filter-hint">
-  <button class="btn" type="submit" data-variant="outline">Search</button>
-  <span class="sr-only-live" id="filter-hint">Press slash to focus, escape to clear.
-    Searches every track, not only the ones on screen.</span>
-</form>
-{% endblock %}
-
 {% block content %}
 {% if total == 0 %}
   {# A good state, not a failure. Owning everything you love is the end this
      whole application is aiming at, so the copy does not apologise for it. #}
   {# See owned.html: these carry what a rack would have had, so the first
      row to arrive live can take this block's place. #}
-  <div class="empty" data-view="wanted" data-group="{{ group_by }}">
+  <div class="empty" data-view="wanted">
     <p class="empty__head">Want list</p>
     <p class="empty__body">Nothing on the want list. Love a track on Last.fm, ListenBrainz or
       Navidrome and it lands here within a minute.</p>
@@ -64,12 +32,11 @@
   <p class="sr-only-live" id="rack-keys">Arrow keys move between tracks. S selects a track,
     C claims it, X ignores it.</p>
 
-  <ul class="rack" id="rack" role="list" data-view="wanted" data-group="{{ group_by }}"
+  {# Newest first, as the repository answered. No headers: the list is one
+     run of rows and the date each carries is on the row itself. #}
+  <ul class="rack" id="rack" role="list" data-view="wanted"
       aria-describedby="rack-keys">
-    {% for g in groups %}
-      {{ r.group_head(g) }}
-      {% for t in g.tracks %}{{ r.row(t, 'wanted') }}{% endfor %}
-    {% endfor %}
+    {% for t in tracks %}{{ r.row(t, 'wanted') }}{% endfor %}
   </ul>
 
   {% if shown is defined and shown < total %}
@@ -80,9 +47,9 @@
      scripting off; with scripting on the browser fetches the window instead
      and keeps the scroll position it had. #}
   <div class="more" id="more" data-offset="{{ shown }}" data-limit="{{ page_size }}"
-       data-total="{{ total }}" data-group="{{ group_by }}">
+       data-total="{{ total }}">
     <a class="btn" data-variant="outline" id="more-load"
-       href="/?group={{ group_by }}&amp;show={{ shown + page_size }}">
+       href="/?show={{ shown + page_size }}">
       {{ ic.icon('down', 15, 2) }}
       <span id="more-label">Load {{ [page_size, total - shown]|min }} more</span>
     </a>
@@ -90,19 +57,6 @@
     <p class="more__note" id="more-note" hidden></p>
   </div>
   {% endif %}
-
-  <div class="empty" id="filter-empty" hidden>
-    <p class="empty__head">Filter</p>
-    <p class="empty__body">No wanted tracks match <b id="filter-echo"></b>.</p>
-    <p class="empty__body" id="filter-more" hidden>The filter reads the rows that are loaded.
-      <b id="filter-more-n">0</b> are still on the server.</p>
-    <div class="empty__actions">
-      <button type="button" class="btn" data-variant="outline" id="filter-clear">Clear filter</button>
-      <button type="button" class="btn" data-variant="outline" id="filter-load" hidden>
-        Load the rest
-      </button>
-    </div>
-  </div>
 
   {# Confirming claims in bulk authorises money to be spent, so the number is
      stated in words before anything is sent, the press that arms the confirm

@@ -5,25 +5,22 @@
 
 {% block content %}
 {% if total == 0 %}
-  {# Carries the rack's own view and grouping so that the first row to
-     arrive live can replace this with a real list. Without them the very
-     first purchase you ever file lands on a tab still saying nothing is
-     claimed yet, until the page is reloaded by hand. #}
-  <div class="empty" data-view="owned" data-group="date">
+  {# Carries the rack's own view so that the first row to arrive live can
+     replace this with a real list. Without it the very first purchase you
+     ever file lands on a tab still saying nothing is claimed yet, until the
+     page is reloaded by hand. #}
+  <div class="empty" data-view="owned">
     <p class="empty__head">Owned</p>
     <p class="empty__body">Nothing claimed yet. Buy something, claim it here, and the file lands
       in your library with its quality stamped on it.</p>
   </div>
 {% else %}
   {# The payoff view. Same rows, same plate, except the plate now reports what
-     actually landed on disk rather than what a shop was willing to say. #}
-  {# Grouped by date here, and the date means something: it is when the file
-     landed, one purchase at a time, rather than when an import ran. #}
-  <ul class="rack" id="rack" role="list" data-view="owned" data-group="date">
-    {% for g in groups %}
-      {{ r.group_head(g) }}
-      {% for t in g.tracks %}{{ r.row(t, 'owned') }}{% endfor %}
-    {% endfor %}
+     actually landed on disk rather than what a shop was willing to say.
+     Newest purchase first, and the date on each row is the day its file
+     landed rather than the day an import ran. #}
+  <ul class="rack" id="rack" role="list" data-view="owned">
+    {% for t in tracks %}{{ r.row(t, 'owned') }}{% endfor %}
   </ul>
 {% endif %}
 {% endblock %}

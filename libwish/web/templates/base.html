@@ -20,8 +20,11 @@
 <link rel="icon" href="/static/icons/favicon-32.png" sizes="32x32" type="image/png">
 <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
 
-{#- Applied before first paint so a stored choice never flashes the other
-    theme. It sets an attribute and touches no geometry, so nothing shifts. -#}
+{#- The page follows the operating system. There is no control for this any
+    more, and this script is what still honours `lw-theme` in localStorage if
+    something sets it, which is the only way left to pin light on a dark
+    desktop. Applied before first paint, and it sets an attribute rather than
+    touching geometry, so nothing shifts. -#}
 <script>
   try {
     var t = localStorage.getItem('lw-theme');
@@ -108,11 +111,6 @@
       <li><a class="tab" href="/ignored" {% if view == 'ignored' %}aria-current="page"{% endif %}>
         Ignored <span class="tab__count" data-count="ignored">{{ counts.ignored|default(0) }}</span></a></li>
     </ul>
-    <div class="bar__controls">
-      {% block controls %}{% endblock %}
-      <button type="button" class="btn" data-variant="ghost" data-size="sm" id="theme-toggle"
-              aria-label="Change theme">Theme</button>
-    </div>
   </nav>
 
   <main id="main">

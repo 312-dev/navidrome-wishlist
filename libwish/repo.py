@@ -113,7 +113,7 @@ class TrackRepo:
         where, args = search_clause(q)
         return self._rows(
             f"SELECT {cols} FROM tracks WHERE status='ignored'{where}"
-            " ORDER BY ignored_at DESC", args
+            " ORDER BY ignored_at DESC, id DESC", args
         )
 
     def owned(self, q: str = "") -> list[dict]:
@@ -121,7 +121,7 @@ class TrackRepo:
         where, args = search_clause(q)
         return self._rows(
             f"SELECT {cols} FROM tracks WHERE status IN ('purchased','owned'){where}"
-            " ORDER BY purchased_at DESC", args
+            " ORDER BY purchased_at DESC, id DESC", args
         )
 
     def get(self, track_id: int) -> dict | None:

@@ -37,10 +37,11 @@
   --radius-xl: 4px;
 }
 
-/* Dark applies on the system preference and on an explicit choice, so the
-   toggle wins in both directions. A page that only reads the media query
-   cannot be forced light on a dark desktop, which is the setting the primary
-   user actually wants. */
+/* Dark applies on the system preference, and `data-theme` still overrides it
+   in both directions. Nothing in the interface sets that attribute now; the
+   pre-paint script in base.html reads `lw-theme` from localStorage, which is
+   what keeps light-on-a-dark-desktop reachable at all. A page that only read
+   the media query could not be pinned either way. */
 @custom-variant dark {
   @media (prefers-color-scheme: dark) {
     &:where(:root:not([data-theme='light']), :root:not([data-theme='light']) *) {
@@ -363,35 +364,10 @@
 
   .masthead__said:empty { display: none; }
 
-  /* --- search ------------------------------------------------------------ */
-
-  /* A form rather than a bare input, so searching works with scripting off and
-     a result is a linkable URL. It has to sit on the bar's baseline like every
-     other control there, which an unstyled block-level form does not do. */
-  .search {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    min-width: 0;
-  }
-
-  .search .input {
-    width: clamp(9rem, 22vw, 16rem);
-    min-width: 0;
-  }
-
-  /* The button is a fallback for a page without scripting, where typing and
-     pressing enter is the ordinary path anyway. It stays available to keyboards
-     and pointers without competing with the field beside it. */
-  .search button {
-    flex: 0 0 auto;
-    white-space: nowrap;
-  }
-
+  /* The bar has to be allowed to wrap before anything inside it can take a
+     line of its own, or the tabs and the controls beside them squeeze rather
+     than stack. */
   @media (max-width: 640px) {
-    /* The controls group has to be allowed to wrap before anything inside it
-       can take a line of its own. Without this the search field only shrinks,
-       down to a box too narrow to read what you typed. */
     .bar__controls {
       flex-wrap: wrap;
       row-gap: 8px;
@@ -401,17 +377,9 @@
       row-gap: 8px;
       padding-bottom: 8px;
     }
-    .search {
-      flex: 1 1 100%;
-      order: 5;
-    }
-    .search .input {
-      flex: 1 1 auto;
-      width: auto;
-    }
   }
 
-  /* --- bar: tabs, grouping, filter -------------------------------------- */
+  /* --- bar: tabs and controls ------------------------------------------ */
 
   .bar {
     position: sticky;
@@ -515,38 +483,6 @@
     margin: 0;
     padding: 0;
     list-style: none;
-  }
-
-  .group-head {
-    position: sticky;
-    top: var(--bar-h);
-    z-index: 20;
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 10px 16px;
-    background: var(--sleeve);
-    border-top: 1px solid var(--rule-firm);
-    border-bottom: 1px solid var(--rule);
-    font-family: var(--font-sans);
-    font-stretch: 115%;
-    font-weight: 700;
-    font-size: var(--t-group);
-    line-height: 1;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-    text-wrap: balance;
-  }
-  .group-head__count {
-    font-weight: 400;
-    letter-spacing: 0.06em;
-    color: var(--fade);
-    font-variant-numeric: tabular-nums;
-  }
-  .group-head__rule {
-    flex: 1;
-    height: 1px;
-    background: var(--rule);
   }
 
   /* --- row -------------------------------------------------------------- */
@@ -818,12 +754,30 @@
   .menu {
     position: relative;
   }
+
+  /* The row holding an open menu lifts as a whole.
+     Raising only the menu is not enough. A menu is taller than the row it
+     hangs off, so it always overlaps the row below, and any row that paints
+     in a layer of its own lands on top of it: one arriving carries a
+     transform, one leaving carries an opacity, and either is enough. Lifting
+     the row makes the menu part of what is lifted, whatever the rows below
+     are doing. */
+  .row:has(.menu[data-open='true']) {
+    position: relative;
+    /* Above the confirm bar at 35, which is what was cutting a menu in half:
+       a menu hangs below its own row, and with rows selected the bar sits over
+       exactly that space. Raising the menu alone would not have been enough
+       either, since the row is what the bar overlaps.
+
+       Only while a menu is open, and the menu closes on scroll, so a lifted
+       row is never carried up over the sticky bar it is scrolling past. The
+       skip link stays above everything at 60. */
+    z-index: 40;
+  }
   .menu__list {
     position: absolute;
     top: calc(100% + 4px);
     right: 0;
-    /* Above the sticky group headers, which sit at 20. A menu that opens
-       underneath the header of the next group is worse than no menu. */
     z-index: 30;
     min-width: 100%;
     display: flex;

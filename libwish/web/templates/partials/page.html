@@ -1,13 +1,8 @@
 {#
-  One window of the want list: group headers and rows, in rack order.
+  One window of the want list, in rack order.
 
-  Appended below what the browser already holds and never swapped over it. The
-  headers repeat a key the page may already show when a group straddles the
-  boundary between two windows; the client folds those together rather than the
-  server guessing what the client has.
+  Appended below what the browser already holds and never swapped over it, so
+  asking for more can never move a row someone is reading.
 #}
 {% import "macros/row.html" as r %}
-{%- for g in groups -%}
-{{ r.group_head(g) }}
-{%- for t in g.tracks %}{{ r.row(t, view) }}{% endfor -%}
-{%- endfor -%}
+{%- for t in tracks %}{{ r.row(t, view) }}{% endfor -%}

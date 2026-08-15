@@ -373,21 +373,20 @@ def plate_for(track: dict) -> dict:
 
     if status in ("purchased", "owned"):
         tier = tier_for(track.get("quality"))
+        # Where it came from, and nothing else. The tab this row is on already
+        # says it is owned, and the date it was bought is on the row itself, so
+        # a plate repeating both said three things where one was wanted.
+        #
+        # "OWNED" survives only as the fallback for a row with no store
+        # recorded, which pre-dates the column. The plate has to say something,
+        # and the state is the one fact such a row still has.
         return {**PLATE_BLANK,
                 "state": "owned",
-                # No recorded file details means the plate says only what it
-                # knows, which is that this is owned. It does not invent a
-                # format to fill the line.
-                "l1": tier["label"] if tier else "OWNED",
-                "l2": (track.get("purchased_via") or "").upper(),
-                "l2r": _fmt_stamp_date(track.get("purchased_at")),
+                "l1": (track.get("purchased_via") or "").upper() or "OWNED",
                 "tier": tier,
-                # The mark is the stamp's word. With a tier recorded the first
-                # line names the quality and the mark says OWNED beneath it.
-                # With no tier the first line already says OWNED, and repeating
-                # it makes a deliberate tilt read as a rendering fault rather
-                # than as a stamp.
-                "mark": "OWNED" if tier else ""}
+                # With a tier the mark names the quality beside the ladder that
+                # measures it. Without one there is no honest number to print.
+                "mark": tier["label"] if tier else ""}
 
     # NO STORE means nowhere to buy this, not "you have not picked one yet".
     # Only a row the user has explicitly assigned carries a store of its own, so
@@ -427,19 +426,7 @@ def _stores() -> list[dict]:
         return []
 
 
-def group_key_for(row: dict, by: str) -> str:
-    """Which bucket a row belongs to, from the raw row.
-
-    Readable before decoration so that a window over the list can be cut, and
-    its group headers counted, without turning every queued row into a view
-    model first.
-    """
-    if by == "artist":
-        return row.get("artist") or "Unknown artist"
-    return _fmt_day(row.get("added_at"))
-
-
-def view_track(row: dict, group_by: str = "date") -> dict:
+def view_track(row: dict) -> dict:
     """One database row, plus everything the templates need that it lacks.
 
     `quality`, `quality_note` and `file_path` are passed through untouched.
@@ -479,77 +466,20 @@ def view_track(row: dict, group_by: str = "date") -> dict:
     # checkbox: an unusable checkbox in a selection column is a promise the
     # confirm button cannot keep.
     t["selectable"] = bool(t["stores"]) and t["state"] in ("wanted", "refused")
-    # The group this row belongs to, decided here rather than in the browser, so
-    # a row arriving over the live connection lands under the right header
-    # without the client having to reimplement the grouping rule.
-    t["group_key"] = group_key_for(t, group_by)
     return t
 
 
-def group_tracks(tracks: Iterable[dict], by: str) -> list[dict]:
-    """Rows bucketed into the sticky-headed groups the rack renders.
+def rack_window(rows: list[dict], offset: int = 0,
+                limit: int = PAGE_SIZE) -> tuple[list[dict], int]:
+    """One window over a list, decorated, plus the length of the whole list.
 
-    Grouping is a control rather than a fixed rule because loving forty tracks
-    in one sitting makes a date group meaningless, and buying is release-shaped,
-    so the artist grouping puts the things you would purchase together next to
-    each other. 06 offers a tier grouping as the second option; that needs a
-    promised tier, which no shipping store supplies, so artist takes its place.
+    The list arrives from the repository in the order it is shown, newest
+    first, so a window is a slice and nothing here reorders anything. Only the
+    rows in the window are decorated, which is what keeps one refusal lookup
+    per rendered row from becoming one per queued row.
     """
-    buckets: dict[str, list[dict]] = {}
-    for t in tracks:
-        buckets.setdefault(t["group_key"], []).append(t)
-    return [{"key": k, "tracks": v, "n": len(v)} for k, v in buckets.items()]
-
-
-def order_rows(rows: list[dict], by: str) -> list[dict]:
-    """Rows in the order their grouping needs.
-
-    The repository answers in love order, which is what a date grouping wants
-    and what an artist grouping cannot use: one artist's tracks would be
-    scattered down the whole list, so a group would open, close and reopen, and
-    every window over the list would reopen groups the previous one had already
-    closed. Sorting by artist makes each bucket contiguous, which is what lets a
-    page be a window rather than a second query.
-    """
-    if by != "artist":
-        return list(rows)
-    return sorted(
-        rows,
-        key=lambda r: ((r.get("artist") or "").casefold(),
-                       -(r.get("added_at") or 0),
-                       r.get("id") or 0),
-    )
-
-
-def rack_window(rows: list[dict], group_by: str,
-                offset: int = 0, limit: int = PAGE_SIZE) -> tuple[list[dict], int]:
-    """Group headers and decorated rows for one window over a list.
-
-    Each header carries the size of the whole group rather than the part of it
-    this window reached, so a header never contradicts itself when the next
-    window fills in underneath. Only the rows in the window are decorated, which
-    is what keeps one refusal lookup per rendered row from becoming one per
-    queued row.
-    """
-    ordered = order_rows(rows, group_by)
-    buckets: dict[str, list[dict]] = {}
-    for row in ordered:
-        buckets.setdefault(group_key_for(row, group_by), []).append(row)
-
-    groups: list[dict] = []
-    skip, left = max(0, offset), max(0, limit)
-    for key, bucket in buckets.items():
-        if left <= 0:
-            break
-        if skip >= len(bucket):
-            skip -= len(bucket)
-            continue
-        take = bucket[skip:skip + left]
-        skip = 0
-        left -= len(take)
-        groups.append({"key": key, "n": len(bucket),
-                       "tracks": _decorate(take, group_by)})
-    return groups, len(ordered)
+    window = rows[max(0, offset):max(0, offset) + max(0, limit)]
+    return _decorate(window), len(rows)
 
 
 def _counts() -> dict[str, int]:
@@ -790,11 +720,10 @@ def _enrich_gaps(rows: list[dict]) -> set[int]:
 def _request_conn() -> Any:
     """One database connection per request, closed when the request ends.
 
-    Grouping calls the decorator once per group, and an artist-grouped window of
-    60 rows has around 54 of them, so a connection opened inside that work was
-    opened 54 times. Each open re-applies pragmas and can wait out the busy
-    timeout behind a writer, which is what made switching tabs quickly stall the
-    whole application.
+    A rendered row asks the database its own questions, so a connection opened
+    per row was opened sixty times for one screenful. Each open re-applies
+    pragmas and can wait out the busy timeout behind a writer, which is what
+    made switching tabs quickly stall the whole application.
     """
     from flask import g
 
@@ -811,9 +740,9 @@ def _request_conn() -> Any:
 def _request_cache(key: str, produce):
     """Compute something once per request.
 
-    The same per-group repetition applies to the job and enrichment lookups:
-    their answers cannot change within one render, so computing them per group
-    is repeated work with no chance of a different result.
+    The job and enrichment lookups answer the same question for every row in
+    a response, and their answers cannot change within one render, so asking
+    per row is repeated work with no chance of a different result.
     """
     from flask import g
 
@@ -826,13 +755,13 @@ def _request_cache(key: str, produce):
     return cache[key]
 
 
-def _decorate(rows: list[dict], group_by: str = "date") -> list[dict]:
+def _decorate(rows: list[dict]) -> list[dict]:
     live, broke = _request_cache("claim_jobs", _claim_jobs)
     gaps = _enrich_gaps(rows)
-    return _decorate_rows(rows, group_by, live, broke, gaps, _request_conn())
+    return _decorate_rows(rows, live, broke, gaps, _request_conn())
 
 
-def _decorate_rows(rows, group_by, live, broke, gaps, conn) -> list[dict]:
+def _decorate_rows(rows, live, broke, gaps, conn) -> list[dict]:
     out = []
     for row in rows:
         row = dict(row)
@@ -850,7 +779,7 @@ def _decorate_rows(rows, group_by, live, broke, gaps, conn) -> list[dict]:
             row["refusal"] = refusal_for(row["id"], conn)
             if not row["refusal"] and row["id"] in broke:
                 row["failure"] = failure_for(broke[row["id"]])
-        out.append(view_track(row, group_by))
+        out.append(view_track(row))
     return out
 
 
@@ -890,17 +819,13 @@ def wanted():
     counts = _counts()
     if not counts.get("wanted") and not counts.get("owned") and not counts.get("ignored"):
         return render_template("pages/first_run.html", counts=counts, view="wanted")
-    group_by = _group_arg()
     show = _show_arg()
-    query = _search_arg()
-    groups, total = rack_window(_tracks().queued(query), group_by, 0, show)
+    rows, total = rack_window(_tracks().queued(_search_arg()), 0, show)
     return render_template(
         "pages/wanted.html",
         view="wanted",
-        q=query,
         counts=counts,
-        group_by=group_by,
-        groups=groups,
+        tracks=rows,
         total=total,
         shown=min(show, total),
         page_size=PAGE_SIZE,
@@ -909,19 +834,19 @@ def wanted():
 
 @bp.route("/owned")
 def owned():
-    tracks = _decorate(_tracks().owned(_search_arg()), "date")
+    tracks = _decorate(_tracks().owned(_search_arg()))
     return render_template(
         "pages/owned.html",
         view="owned",
         counts=_counts(),
-        groups=group_tracks(tracks, "date"),
+        tracks=tracks,
         total=len(tracks),
     )
 
 
 @bp.route("/ignored")
 def ignored():
-    tracks = [view_track(dict(r), "date") for r in _tracks().ignored(_search_arg())]
+    tracks = [view_track(dict(r)) for r in _tracks().ignored(_search_arg())]
     return render_template(
         "pages/ignored.html", view="ignored", counts=_counts(), tracks=tracks
     )
@@ -1002,22 +927,6 @@ def _search_arg() -> str:
     return (request.args.get("q") or "").strip()[:120]
 
 
-def _group_arg() -> str:
-    """Which grouping a request asked for, date unless it said otherwise.
-
-    Date is the default because the list is a record of what you loved and
-    when, and reading it newest first is how you find the thing you added this
-    morning. It reads poorly against a backlog that arrived in one import: a
-    seeded queue puts almost every row under a single header, and a header
-    holding the whole list is not a landmark. That is a property of the seed
-    rather than of the grouping, and it thins out as loves arrive a day at a
-    time. Artist stays on the control, and is the better read when the job is
-    "what am I buying", since it puts a release's tracks together.
-    """
-    group = request.args.get("group", "date")
-    return group if group in ("date", "artist") else "date"
-
-
 def _show_arg() -> int:
     """How many rows this response carries, from ?show=.
 
@@ -1038,7 +947,7 @@ def _one(track_id: int) -> dict:
     row = _tracks().get(track_id)
     if row is None:
         abort(404)
-    return _decorate([row], _group_arg())[0]
+    return _decorate([row])[0]
 
 
 @bp.route("/ui/row/<int:track_id>")
@@ -1054,7 +963,7 @@ def ui_rows():
     ids = [int(part) for part in raw.split(",") if part.strip().isdigit()][:200]
     repo = _tracks()
     rows = [r for r in (repo.get(i) for i in ids) if r]
-    tracks = _decorate(rows, _group_arg())
+    tracks = _decorate(rows)
     return render_template(
         "partials/rows.html", tracks=tracks, view=request.args.get("view", "wanted")
     )
@@ -1062,13 +971,12 @@ def ui_rows():
 
 @bp.route("/ui/page")
 def ui_page():
-    """The next window of the want list, headers and rows.
+    """The next window of the want list.
 
     Answers the load-more control. The client appends this below what is
     already on screen and never re-renders what is there, so asking for more
     cannot move a row someone is reading.
     """
-    group_by = _group_arg()
     try:
         offset = max(0, int(request.args.get("offset", 0)))
     except ValueError:
@@ -1077,9 +985,9 @@ def ui_page():
         limit = max(1, min(int(request.args.get("limit", PAGE_SIZE)), MAX_SHOW))
     except ValueError:
         limit = PAGE_SIZE
-    groups, total = rack_window(_tracks().queued(_search_arg()), group_by, offset, limit)
+    rows, total = rack_window(_tracks().queued(_search_arg()), offset, limit)
     response = current_app.response_class(
-        render_template("partials/page.html", groups=groups,
+        render_template("partials/page.html", tracks=rows,
                         view=request.args.get("view", "wanted")),
         mimetype="text/html",
     )
