@@ -202,7 +202,7 @@ def claim_confirm(track_id: int):
     conn = svc.db()
     try:
         from .. import identity, match
-        from ..claim import shown_candidate_key
+        from .views import shown_candidate_key
 
         row = svc.tracks.get(track_id)
         # Which purchase the panel was showing when it was confirmed. Carried
@@ -271,7 +271,7 @@ def claim_confirm_bulk():
     store_id = body.get("store")
     note = str(body.get("note") or "confirmed by the user after a refusal")[:2000]
     from .. import identity, match
-    from ..claim import shown_candidate_key
+    from .views import shown_candidate_key
     from ..db import transaction
 
     now = int(time.time())

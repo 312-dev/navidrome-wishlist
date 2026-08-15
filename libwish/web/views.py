@@ -681,6 +681,41 @@ def refusal_for(track_id: int, conn: Any = None) -> dict | None:
     }
 
 
+def shown_candidate_key(conn: Any, track_id: int) -> str | None:
+    """The store's key for the purchase the refusal panel is naming, or None.
+
+    Confirming a refusal is a person agreeing with one particular purchase, so
+    the confirmation has to record which one, and this is where it is read from.
+    It selects the same row `refusal_for` renders, by the same rule, and the two
+    have to keep agreeing: pointing at a different decision than the one on
+    screen would download something the reader was never shown.
+
+    Deliberately not the newest decision of any kind. Pressing confirm writes a
+    decision of its own, so on a second press the newest row is that
+    confirmation, which names nothing, and the panel underneath is still showing
+    the original refusal. Reading the newest row was what made the second press
+    behave differently from the first.
+
+    The candidate is stored as an identity, which carries the store's key under
+    `store_id`; `item_key` is the same value on rows written from an `OwnedItem`
+    instead.
+    """
+    marks = ", ".join("?" for _ in CLAIM_DECISION_PHASES)
+    try:
+        row = conn.execute(
+            "SELECT candidate_json FROM match_decision"
+            " WHERE track_id=? AND outcome='refused' AND dismissed_at IS NULL"
+            f" AND phase IN ({marks})"
+            " ORDER BY decided_at DESC, id DESC LIMIT 1",
+            (track_id, *CLAIM_DECISION_PHASES),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    payload = _payload(row["candidate_json"]) if row else {}
+    key = payload.get("store_id") or payload.get("item_key")
+    return str(key) if key else None
+
+
 def _enrich_gaps(rows: list[dict]) -> set[int]:
     """Tracks whose metadata lookup came back inconclusive, of those asked for.
 

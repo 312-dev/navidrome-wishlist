@@ -519,6 +519,21 @@ class ConfirmingARefusalTakesTheTrackItNamed(Base):
         self.assertEqual(row["outcome"], "user_confirmed")
         self.assertEqual(json.loads(row["candidate_json"])["item_key"], "right")
 
+    def test_pressing_it_a_second_time_does_the_same_thing_as_the_first(self):
+        # What was actually reported. The first press was pressed again when
+        # nothing happened, and by then the newest decision was that first
+        # confirmation, which names no purchase. The panel on screen was still
+        # the original refusal, so that is the row this reads.
+        track_id = self.a_track("Percy Sledge", "Love Me Tender")
+        self.a_refusal(track_id, StubStore(
+            [owned("Percy Sledge", "Love Me Tender (2000 Remaster)", "a")]))
+        self.confirm_over_http(track_id)
+        self.confirm_over_http(track_id)
+
+        store = StubStore([owned("Percy Sledge", "Love Me Tender (2000 Remaster)", "a")])
+        self.run_claim(track_id, store)
+        self.assertEqual(store.downloaded, ["a"])
+
     def test_the_confirmation_is_spent_once(self):
         track_id = self.a_track("Percy Sledge", "Love Me Tender")
         self.a_refusal(track_id, StubStore(

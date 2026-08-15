@@ -82,33 +82,6 @@ def _describe(ident) -> dict:
     return {"repr": str(ident)[:500]}
 
 
-def shown_candidate_key(conn, track_id: int) -> str | None:
-    """The purchase the newest decision put in front of the reader, if any.
-
-    A refusal panel names one candidate: the near miss the matcher turned down.
-    Confirming that panel is a person pointing at that item, so the confirmation
-    has to record which item it was, and this is where it is read from. The
-    identity stored in `candidate_json` carries the store's own key for it under
-    `store_id`; `item_key` is the same value on the rows written from an
-    `OwnedItem` rather than a scored identity.
-
-    None means there was nothing on screen to point at, which is a refusal
-    saying nothing in the account came close rather than one naming a version
-    the reader can recognise.
-    """
-    row = conn.execute(
-        "SELECT candidate_json FROM match_decision WHERE track_id=?"
-        " ORDER BY decided_at DESC, id DESC LIMIT 1", (track_id,)).fetchone()
-    if not row or not row["candidate_json"]:
-        return None
-    try:
-        payload = json.loads(row["candidate_json"])
-    except ValueError:
-        return None
-    key = payload.get("store_id") or payload.get("item_key")
-    return str(key) if key else None
-
-
 def verify_audio(path, *, min_bytes: int = MIN_BYTES) -> str:
     """Confirm a downloaded file is audio. Returns the detected format.
 
