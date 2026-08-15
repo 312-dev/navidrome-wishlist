@@ -82,6 +82,33 @@ def _describe(ident) -> dict:
     return {"repr": str(ident)[:500]}
 
 
+def shown_candidate_key(conn, track_id: int) -> str | None:
+    """The purchase the newest decision put in front of the reader, if any.
+
+    A refusal panel names one candidate: the near miss the matcher turned down.
+    Confirming that panel is a person pointing at that item, so the confirmation
+    has to record which item it was, and this is where it is read from. The
+    identity stored in `candidate_json` carries the store's own key for it under
+    `store_id`; `item_key` is the same value on the rows written from an
+    `OwnedItem` rather than a scored identity.
+
+    None means there was nothing on screen to point at, which is a refusal
+    saying nothing in the account came close rather than one naming a version
+    the reader can recognise.
+    """
+    row = conn.execute(
+        "SELECT candidate_json FROM match_decision WHERE track_id=?"
+        " ORDER BY decided_at DESC, id DESC LIMIT 1", (track_id,)).fetchone()
+    if not row or not row["candidate_json"]:
+        return None
+    try:
+        payload = json.loads(row["candidate_json"])
+    except ValueError:
+        return None
+    key = payload.get("store_id") or payload.get("item_key")
+    return str(key) if key else None
+
+
 def verify_audio(path, *, min_bytes: int = MIN_BYTES) -> str:
     """Confirm a downloaded file is audio. Returns the detected format.
 
@@ -157,10 +184,11 @@ class ClaimPipeline:
 
         # A purchase already chosen for this track skips scoring entirely
         # rather than joining the candidate list. Someone pointing at one exact
-        # item is stronger evidence than any score, and a sweep that matched
-        # this track against one specific purchase has already put the question
-        # to the matcher and written down the answer; asking again here can
-        # only produce a second answer to a settled question.
+        # item, in the picker or by confirming the one a refusal showed them, is
+        # stronger evidence than any score, and a sweep that matched this track
+        # against one specific purchase has already put the question to the
+        # matcher and written down the answer; asking again here can only
+        # produce a second answer to a settled question.
         chosen = self._chosen_purchase(track["id"])
         if chosen is not None:
             chosen_key, how = chosen
@@ -179,9 +207,10 @@ class ClaimPipeline:
             want = identity.build_identity(track["artist"], track["title"])
             self._record(
                 track["id"], want, item, None, "downloaded_by_pick",
-                "downloaded the purchase picked by hand, not matched"
-                if how == "user_picked" else
-                "downloaded the purchase a sweep matched, not matched again",
+                {"user_picked": "downloaded the purchase picked by hand, not matched",
+                 "user_confirmed": "downloaded the purchase the refusal named,"
+                                   " confirmed by the user rather than matched again",
+                 }.get(how, "downloaded the purchase a sweep matched, not matched again"),
                 len(owned), store.id)
         else:
             progress("match", candidates=len(owned))
@@ -249,9 +278,11 @@ class ClaimPipeline:
                              len(candidates), store_id,
                              gate_failed=decision.gate_failed, matched_via=decision.matched_via)
                 return decision, index
-            # Confirmation is permission to accept a near miss, not permission to
-            # download anything at all. Below the confirm floor there is no
-            # candidate worth attaching someone's intent to, so this still refuses.
+            # A confirmation that named no candidate is permission to accept a
+            # near miss, not permission to download anything at all. Below the
+            # confirm floor there is nothing worth attaching someone's intent
+            # to, so this still refuses. A confirmation of a named candidate
+            # does not come through here; see `_chosen_purchase`.
             self._record(track["id"], want, candidates[index] if index is not None else None,
                          score, "refused_despite_confirmation",
                          "confirmed by the user, but no candidate reaches the confirm floor",
@@ -297,11 +328,16 @@ class ClaimPipeline:
         return decision, index
 
     def _user_confirmed(self, track_id: int) -> bool:
-        """Whether the newest decision for this track is a user confirmation.
+        """Whether the newest decision is a confirmation naming no candidate.
 
         Newest rather than any, so a confirmation is spent once. Otherwise a
         single override would silently license every future claim on that track,
         including ones about a different candidate the user never saw.
+
+        A confirmation that does name one never reaches here: `_chosen_purchase`
+        reads it first and downloads that item. What is left is someone
+        confirming a refusal that put nothing on screen, where there is no item
+        to attach the intent to and the matcher still has to find one.
         """
         conn = self.svc.db()
         try:
@@ -317,24 +353,26 @@ class ClaimPipeline:
     def _chosen_purchase(self, track_id: int) -> tuple[str, str] | None:
         """A purchase already chosen for this track, as (item_key, by what).
 
-        Two outcomes name one specific purchase rather than a score.
+        Three outcomes name one specific purchase rather than a score.
         `user_picked` is a person pointing at one in the picker. `swept` is the
-        purchase sweep matching one unattended and writing down which. Both are
-        read off the newest decision for the track, same as `_user_confirmed`
-        and for the same reason: a choice is spent once, so a track refused
-        again later does not silently keep downloading whatever was chosen
-        before. The identity itself travels in `candidate_json` rather than a
-        new column, because that is where a decision's winner already lives; a
-        pick has no scored candidate, but it has exactly this.
+        purchase sweep matching one unattended and writing down which.
+        `user_confirmed` is a person agreeing with the one candidate a refusal
+        panel put on screen, which is the same act as a pick with the choosing
+        already done for them. All three are read off the newest decision for
+        the track, same as `_user_confirmed` and for the same reason: a choice
+        is spent once, so a track refused again later does not silently keep
+        downloading whatever was chosen before. The identity itself travels in
+        `candidate_json` rather than a new column, because that is where a
+        decision's winner already lives; a pick has no scored candidate, but it
+        has exactly this.
 
-        A sweep has to arrive here rather than through `_user_confirmed`.
-        Confirmation only licenses a candidate that still reaches the confirm
-        floor, and a sweep may have accepted one that scores nothing at all: a
-        purchase refused solely for being a different version of the wanted
-        song, which the sweep is allowed to take when it is the only one.
-        Rescoring that here would refuse the exact thing the sweep accepted,
-        and the claim would fail on a decision this application had already
-        made.
+        A sweep and a confirmation both have to arrive here rather than through
+        `_user_confirmed`, because rescoring is exactly what neither survives.
+        Every gate refusal scores zero, so a candidate refused solely for being
+        a different version of the wanted song can never reach the confirm
+        floor no matter who agrees with it. Sending those through the floor is
+        what made "That is the right track, download it" refuse the track it
+        was pointing at.
         """
         conn = self.svc.db()
         try:
@@ -343,7 +381,7 @@ class ClaimPipeline:
                 " ORDER BY decided_at DESC, id DESC LIMIT 1", (track_id,)).fetchone()
         finally:
             conn.close()
-        if not row or row["outcome"] not in ("user_picked", "swept"):
+        if not row or row["outcome"] not in ("user_picked", "swept", "user_confirmed"):
             return None
         try:
             payload = json.loads(row["candidate_json"] or "{}")

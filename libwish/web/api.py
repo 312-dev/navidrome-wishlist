@@ -189,6 +189,10 @@ def claim_confirm(track_id: int):
     a different act: someone looked at a refusal, disagreed with it, and took
     responsibility. Recording it under its own outcome is what keeps the audit
     honest about which purchases the software chose and which a person did.
+
+    The audit row names the purchase that was on screen, so the claim downloads
+    that one. Confirming is agreement with a particular candidate, and rescoring
+    the account afterwards would answer a question nobody asked.
     """
     svc = _svc()
     if svc.tracks.get(track_id) is None:
@@ -198,17 +202,23 @@ def claim_confirm(track_id: int):
     conn = svc.db()
     try:
         from .. import identity, match
+        from ..claim import shown_candidate_key
 
         row = svc.tracks.get(track_id)
+        # Which purchase the panel was showing when it was confirmed. Carried
+        # so the claim downloads that item rather than rescoring the account
+        # and refusing the same near miss all over again.
+        key = shown_candidate_key(conn, track_id)
         conn.execute(
             "INSERT INTO match_decision(track_id, decided_at, phase, provider,"
             " matcher_version, lexicon_hash, outcome, reasons, query_json,"
-            " candidates_considered, chosen_store_id)"
-            " VALUES(?,?,?,?,?,?,'user_confirmed',?,?,0,?)",
+            " candidate_json, candidates_considered, chosen_store_id)"
+            " VALUES(?,?,?,?,?,?,'user_confirmed',?,?,?,0,?)",
             (track_id, int(time.time()), "confirm", store_id or "user",
              getattr(match, "MATCHER_VERSION", "1"), identity.lexicon_hash(),
              (body.get("note") or "confirmed by the user after a refusal")[:2000],
              json.dumps({"artist": row["artist"], "title": row["title"]}),
+             json.dumps({"item_key": key}) if key else None,
              store_id),
         )
     finally:
@@ -261,6 +271,7 @@ def claim_confirm_bulk():
     store_id = body.get("store")
     note = str(body.get("note") or "confirmed by the user after a refusal")[:2000]
     from .. import identity, match
+    from ..claim import shown_candidate_key
     from ..db import transaction
 
     now = int(time.time())
@@ -272,13 +283,17 @@ def claim_confirm_bulk():
         # a person confirmed tracks they were never asked about.
         with transaction(conn):
             for track_id, row in rows.items():
+                # Per track, because each one was refused against its own
+                # candidate. See the single-track route.
+                key = shown_candidate_key(conn, track_id)
                 conn.execute(
                     "INSERT INTO match_decision(track_id, decided_at, phase, provider,"
                     " matcher_version, lexicon_hash, outcome, reasons, query_json,"
-                    " candidates_considered, chosen_store_id)"
-                    " VALUES(?,?,?,?,?,?,'user_confirmed',?,?,0,?)",
+                    " candidate_json, candidates_considered, chosen_store_id)"
+                    " VALUES(?,?,?,?,?,?,'user_confirmed',?,?,?,0,?)",
                     (track_id, now, "confirm", store_id or "user", version, lexicon, note,
                      json.dumps({"artist": row["artist"], "title": row["title"]}),
+                     json.dumps({"item_key": key}) if key else None,
                      store_id),
                 )
     finally:

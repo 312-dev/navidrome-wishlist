@@ -11,6 +11,7 @@ answer. So it is pinned here, at the depth where it actually happened.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import tempfile
@@ -466,6 +467,104 @@ class UserPick(Base):
         finally:
             conn.close()
         self.assertEqual(outcomes, ["user_picked", "downloaded_by_pick"])
+
+
+class ConfirmingARefusalTakesTheTrackItNamed(Base):
+    """"That is the right track, download it" downloads that track.
+
+    Reported live: a Percy Sledge single refused against a 2000 remaster, and
+    the button under the refusal did nothing however many times it was pressed.
+    Every gate refusal scores zero, so sending a confirmation back through the
+    confirm floor refused the same near miss again, recording
+    `refused_despite_confirmation` each round. The confirmation has to name the
+    purchase the panel was showing and the claim has to download that one.
+    """
+
+    def a_refusal(self, track_id, store):
+        with self.assertRaises(MatchRefused):
+            self.run_claim(track_id, store)
+
+    def confirm_over_http(self, track_id):
+        response = self.app.test_client().post(
+            f"/api/claim/{track_id}/confirm", json={"store": "stub"})
+        self.assertEqual(response.status_code, 202)
+
+    def test_a_version_variant_is_downloaded_once_the_user_agrees_with_it(self):
+        track_id = self.a_track("Percy Sledge", "Love Me Tender")
+        self.a_refusal(track_id, StubStore(
+            [owned("Percy Sledge", "Love Me Tender (2000 Remaster)", "a")]))
+        self.confirm_over_http(track_id)
+
+        store = StubStore([owned("Percy Sledge", "Love Me Tender (2000 Remaster)", "a")])
+        self.run_claim(track_id, store)
+        self.assertEqual(store.downloaded, ["a"])
+        self.assertEqual(self.purchased_item_key(track_id), "a")
+
+    def test_the_confirmation_names_the_candidate_the_refusal_showed(self):
+        # Not "some purchase": the one on screen. Any other item in the account
+        # is one the reader was never asked about.
+        track_id = self.a_track("Percy Sledge", "Love Me Tender")
+        self.a_refusal(track_id, StubStore([
+            owned("Percy Sledge", "Love Me Tender (2000 Remaster)", "right"),
+            owned("Percy Sledge", "When A Man Loves A Woman", "wrong"),
+        ]))
+        self.confirm_over_http(track_id)
+        conn = self.svc.db()
+        try:
+            row = conn.execute(
+                "SELECT outcome, candidate_json FROM match_decision WHERE track_id=?"
+                " ORDER BY id DESC LIMIT 1", (track_id,)).fetchone()
+        finally:
+            conn.close()
+        self.assertEqual(row["outcome"], "user_confirmed")
+        self.assertEqual(json.loads(row["candidate_json"])["item_key"], "right")
+
+    def test_the_confirmation_is_spent_once(self):
+        track_id = self.a_track("Percy Sledge", "Love Me Tender")
+        self.a_refusal(track_id, StubStore(
+            [owned("Percy Sledge", "Love Me Tender (2000 Remaster)", "a")]))
+        self.confirm_over_http(track_id)
+        self.run_claim(track_id, StubStore(
+            [owned("Percy Sledge", "Love Me Tender (2000 Remaster)", "a")]))
+
+        self.svc.tracks.set_status(track_id, "queued")
+        again = StubStore([owned("Percy Sledge", "Love Me Tender (2000 Remaster)", "a")])
+        with self.assertRaises(MatchRefused):
+            self.run_claim(track_id, again)
+        self.assertEqual(again.downloaded, [])
+
+    def test_the_panel_names_whatever_this_will_download(self):
+        # The button says "that is the right track", so what it downloads has
+        # to be the track the sentence above it described. A refusal against a
+        # different artist entirely names that artist, and confirming it is a
+        # person overruling the matcher about a purchase they can read.
+        track_id = self.a_track("Percy Sledge", "Love Me Tender")
+        self.a_refusal(track_id, StubStore([owned("Elvis Presley", "Love Me Tender", "elvis")]))
+        conn = self.svc.db()
+        try:
+            said = conn.execute(
+                "SELECT reasons FROM match_decision WHERE track_id=?"
+                " ORDER BY id DESC LIMIT 1", (track_id,)).fetchone()["reasons"]
+        finally:
+            conn.close()
+        self.assertIn("Elvis Presley", said)
+
+        self.confirm_over_http(track_id)
+        store = StubStore([owned("Elvis Presley", "Love Me Tender", "elvis")])
+        self.run_claim(track_id, store)
+        self.assertEqual(store.downloaded, ["elvis"])
+
+    def test_a_confirmation_naming_nothing_still_meets_the_confirm_floor(self):
+        # The floor is not gone. A bare confirmation, which is what rows
+        # written before this and the bulk route on a track with no prior
+        # decision produce, has no item to attach the intent to, so the
+        # matcher still has to find one worth downloading.
+        track_id = self.a_track("Percy Sledge", "Love Me Tender")
+        self.confirm(track_id)
+        store = StubStore([owned("Nine Inch Nails", "Closer", "unrelated")])
+        with self.assertRaises(MatchRefused):
+            self.run_claim(track_id, store)
+        self.assertEqual(store.downloaded, [])
 
 
 class SweptDecisions(Base):
