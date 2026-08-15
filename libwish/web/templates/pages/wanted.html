@@ -7,15 +7,13 @@
 {% block controls %}
 <form method="get" action="/" class="bar__group" data-autosubmit>
   <label class="label sr-only-live" for="group">Group by</label>
-  {# Artist leads because the date on a row is the moment an import ran rather
-     than the moment anything was loved: on the queue this was built against,
-     156 of 160 rows carry one timestamp, so a date grouping files almost the
-     whole list under a single header and the header stops being a landmark.
-     Date stays on the control, where it earns its place once loves are
-     arriving live rather than in a batch. #}
+  {# Date leads, matching the default in `_group_arg`, which is where the
+     reasoning for it lives. Artist is the better read when the question is
+     what to buy rather than what arrived, since it puts a release's tracks
+     together, so it stays one press away. #}
   <select class="select field-sm" id="group" name="group">
-    <option value="artist" {% if group_by == 'artist' %}selected{% endif %}>group: artist</option>
     <option value="date" {% if group_by == 'date' %}selected{% endif %}>group: date</option>
+    <option value="artist" {% if group_by == 'artist' %}selected{% endif %}>group: artist</option>
   </select>
   <noscript><button class="btn" data-size="sm" type="submit">Apply</button></noscript>
 </form>

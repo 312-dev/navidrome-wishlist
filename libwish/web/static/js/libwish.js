@@ -148,7 +148,7 @@
     if (shown) shown.textContent = String(offset);
     if (label) label.textContent = 'Load ' + Math.min(step, left) + ' more';
     if (link) {
-      link.href = '/?group=' + encodeURIComponent(more.dataset.group || 'artist') +
+      link.href = '/?group=' + encodeURIComponent(more.dataset.group || 'date') +
                   '&show=' + (offset + step);
     }
     more.hidden = left === 0;
@@ -172,7 +172,7 @@
     more.dataset.busy = 'true';
     moreNote('');
     var url = '/ui/page?view=' + encodeURIComponent(rack.dataset.view || 'wanted') +
-              '&group=' + encodeURIComponent(more.dataset.group || 'artist') +
+              '&group=' + encodeURIComponent(more.dataset.group || 'date') +
               '&offset=' + offset + '&limit=' + limit;
     return fragment(url).then(function (html) {
       more.dataset.busy = 'false';

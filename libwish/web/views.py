@@ -439,7 +439,7 @@ def group_key_for(row: dict, by: str) -> str:
     return _fmt_day(row.get("added_at"))
 
 
-def view_track(row: dict, group_by: str = "artist") -> dict:
+def view_track(row: dict, group_by: str = "date") -> dict:
     """One database row, plus everything the templates need that it lacks.
 
     `quality`, `quality_note` and `file_path` are passed through untouched.
@@ -826,7 +826,7 @@ def _request_cache(key: str, produce):
     return cache[key]
 
 
-def _decorate(rows: list[dict], group_by: str = "artist") -> list[dict]:
+def _decorate(rows: list[dict], group_by: str = "date") -> list[dict]:
     live, broke = _request_cache("claim_jobs", _claim_jobs)
     gaps = _enrich_gaps(rows)
     return _decorate_rows(rows, group_by, live, broke, gaps, _request_conn())
@@ -1003,18 +1003,19 @@ def _search_arg() -> str:
 
 
 def _group_arg() -> str:
-    """Which grouping a request asked for, artist unless it said otherwise.
+    """Which grouping a request asked for, date unless it said otherwise.
 
-    Artist is the default because the date a row carries is the moment an
-    import ran, not the moment anything was loved: in the queue this was built
-    against, 156 of 160 rows share a single timestamp, so a date grouping puts
-    almost the whole list under one header and the header stops being a
-    landmark. Artist spreads the same rows across real buckets and puts the
-    tracks you would buy together next to each other. Date stays on the control
-    for the case a date grouping is meaningful, which is loves arriving live.
+    Date is the default because the list is a record of what you loved and
+    when, and reading it newest first is how you find the thing you added this
+    morning. It reads poorly against a backlog that arrived in one import: a
+    seeded queue puts almost every row under a single header, and a header
+    holding the whole list is not a landmark. That is a property of the seed
+    rather than of the grouping, and it thins out as loves arrive a day at a
+    time. Artist stays on the control, and is the better read when the job is
+    "what am I buying", since it puts a release's tracks together.
     """
-    group = request.args.get("group", "artist")
-    return group if group in ("date", "artist") else "artist"
+    group = request.args.get("group", "date")
+    return group if group in ("date", "artist") else "date"
 
 
 def _show_arg() -> int:

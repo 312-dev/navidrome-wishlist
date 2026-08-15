@@ -882,6 +882,54 @@ class TabCounts(Base):
                 self.assertEqual(counts[view], int(listed))
 
 
+class HowTheListIsGrouped(Base):
+    """The want list groups by date unless the request says otherwise.
+
+    Worth asserting because the default is a single string read in four
+    places: the page route, the two fragment routes the client pages with, and
+    the fallback the client uses when the attribute is missing. Left
+    disagreeing, the first screenful groups one way and everything loaded after
+    it groups another, which reads as rows arriving in the wrong place rather
+    than as a setting.
+    """
+
+    def rack_group(self, path="/"):
+        import re
+
+        body = self.client.get(path).get_data(as_text=True)
+        found = re.search(r'id="rack"[^>]*data-group="([^"]*)"', body)
+        return found.group(1) if found else None
+
+    def test_the_want_list_groups_by_date_by_default(self):
+        self.a_track()
+        self.assertEqual(self.rack_group(), "date")
+
+    def test_asking_for_artist_still_gets_artist(self):
+        self.a_track()
+        self.assertEqual(self.rack_group("/?group=artist"), "artist")
+
+    def test_an_unknown_grouping_falls_back_to_the_default(self):
+        self.a_track()
+        self.assertEqual(self.rack_group("/?group=sideways"), "date")
+
+    def test_the_control_offers_the_current_grouping_as_selected(self):
+        self.a_track()
+        body = self.client.get("/").get_data(as_text=True)
+        # A select whose selected option disagrees with the rows underneath is
+        # a control that lies about the state it is showing.
+        self.assertRegex(body, r'<option value="date"[^>]*selected')
+
+    def test_the_fragment_routes_agree_with_the_page(self):
+        # These are what "load more" and a live arrival call. A fragment
+        # grouped differently from the page inserts rows under headers that do
+        # not match the ones already on screen.
+        track_id = self.a_track()
+        for path in (f"/ui/rows?view=wanted&ids={track_id}", "/ui/page?view=wanted"):
+            with self.subTest(path=path):
+                body = self.client.get(path).get_data(as_text=True)
+                self.assertNotIn('data-group-key="CHVRCHES"', body)
+
+
 class SyncSurvivesANavigation(Base):
     """Where the sync button gets its state after the page is thrown away.
 
