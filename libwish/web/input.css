@@ -310,17 +310,20 @@
 
   /* --- masthead --------------------------------------------------------- */
 
+  /* Holds one control now that the wordmark is gone, so the padding is the
+     button's own breathing room rather than the height a display-size line of
+     type used to set. */
   .masthead {
     display: flex;
     flex-wrap: wrap;
     align-items: baseline;
     gap: 8px 16px;
-    padding: 28px 0 16px;
+    padding: 18px 0 12px;
   }
 
-  /* Pushed to the far edge, opposite the wordmark: it acts on everything on
-     the page rather than on any one row, and sitting beside the mark would
-     read as part of it. */
+  /* Pushed to the far edge, away from the tabs that start the row below it: it
+     acts on everything on the page rather than on any one row, so sitting at
+     the head of the list would read as belonging to whatever it sat next to. */
   .masthead__sync {
     margin-left: auto;
     align-self: center;
@@ -359,23 +362,6 @@
   }
 
   .masthead__said:empty { display: none; }
-
-  /* A rule around the wordmark, not a logo. The shape rhymes with the plate,
-     which is the object the rest of the interface teaches. */
-  .masthead__mark {
-    font-family: var(--font-sans);
-    font-stretch: 115%;
-    font-weight: 700;
-    font-size: var(--t-display);
-    line-height: 1;
-    letter-spacing: -0.015em;
-    text-transform: uppercase;
-    text-wrap: balance;
-    padding: 10px 12px;
-    border: 1px solid var(--rule-firm);
-    border-radius: var(--radius);
-    margin: 0;
-  }
 
   /* --- search ------------------------------------------------------------ */
 
@@ -1797,11 +1783,7 @@
     max-width: 100%;
   }
   .masthead {
-    padding: 20px 0 12px;
     gap: 6px 12px;
-  }
-  .masthead__mark {
-    font-size: 22px;
   }
   .bar {
     flex-wrap: wrap;

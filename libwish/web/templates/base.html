@@ -56,18 +56,25 @@
 <div id="announcer" class="sr-only-live" role="status" aria-live="polite" aria-atomic="true"></div>
 
 <header class="shell">
-  {#- Just the mark. The three counts belong to the tabs below, which carry
-      them beside the view each one describes; saying them again here says
-      nothing the eye does not already have. -#}
+  {#- No wordmark. The tabs below name the three views and the browser tab
+      names the application, so a title here was saying a third time what the
+      eye already had. The heading stays for the document outline: dropping it
+      would leave the page with no h1 at all, which is a real loss to anyone
+      navigating by headings and no gain to anyone else. -#}
   <div class="masthead">
-    <h1 class="masthead__mark">Library Wishlist</h1>
+    <h1 class="sr-only">Library Wishlist</h1>
     {#- Reads every shop's purchases at once and files what it recognises, so
         buying a handful in one go does not mean marking them off one at a
         time. Disabled while one is running: two sweeps would read the same
-        unfiled purchases and queue the same claims twice. -#}
+        unfiled purchases and queue the same claims twice.
+
+        The visible label is the noun; the accessible name keeps the verb,
+        because "Purchases" alone announces like somewhere to go rather than
+        something to do. The visible string is contained in the accessible
+        one, so saying "click Purchases" to a voice control still works. -#}
     <button type="button" class="masthead__sync" id="sync-purchases"
-            aria-describedby="sync-said">
-      {{ ic.icon('refresh', 15) }}<span>Sync purchases</span>
+            aria-label="Sync purchases" aria-describedby="sync-said">
+      {{ ic.icon('refresh', 15) }}<span>Purchases</span>
     </button>
     <p class="masthead__said" id="sync-said" role="status" aria-live="polite"></p>
   </div>
