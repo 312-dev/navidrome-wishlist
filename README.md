@@ -17,7 +17,7 @@ rather buy simply lose track of what they meant to buy. This is the list.
 | Wanted | Owned |
 |---|---|
 | [![The want list](docs/screenshots/wanted.png)](docs/screenshots/wanted.png) | [![What has landed](docs/screenshots/owned.png)](docs/screenshots/owned.png) |
-| Everything loved and still missing, grouped by artist so what you would buy together sits together. | The same rows once the file has landed, each stamped with the shop it came from and the day it arrived. |
+| Everything loved and still missing, newest first. Group by artist instead when the question is what to buy rather than what arrived. | The same rows once the file has landed, each stamped with the shop it came from and the day it arrived. |
 
 ## What it does
 
