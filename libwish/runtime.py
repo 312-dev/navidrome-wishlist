@@ -109,7 +109,13 @@ class Scheduler:
         self.ingest = Ingest(svc)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
-        self._due: dict[str, float] = {sid: 0.0 for sid in providers}
+        # When each source last ran, not when it is next due. The interval is
+        # read fresh on every tick and applied to this, so a reader opening the
+        # page shortens the wait they are actually sitting through. Storing a
+        # due time instead froze the cold interval into it: a source last polled
+        # on the ten minute tier stayed ten minutes away however long someone
+        # sat watching, and "loved it, opened the app, nothing there" was that.
+        self._last: dict[str, float] = {sid: 0.0 for sid in providers}
         self._enrich_due = 0.0
 
     # ---- cursor state ----
@@ -222,18 +228,29 @@ class Scheduler:
         hot = self.svc.bus.someone_watching(s.presence_grace_seconds)
         return s.poll_hot_seconds if hot else s.poll_cold_seconds
 
+    def _due_sources(self, now: float, interval: float) -> list[str]:
+        """Which sources have gone `interval` without a poll.
+
+        Measured backwards from the last poll rather than forwards to a due time
+        decided when that poll finished. The difference is only visible when the
+        interval changes underneath, which is exactly the case that matters:
+        someone opens the page, the app goes hot, and the source they are
+        waiting on is due now instead of at the end of a cold ten minutes.
+        """
+        return [sid for sid in list(self.providers)
+                if now - self._last.get(sid, 0.0) >= interval]
+
     def _run(self) -> None:
         while not self._stop.is_set():
             now = time.time()
             interval = self._interval()
-            for source_id in list(self.providers):
-                if now >= self._due.get(source_id, 0.0):
-                    try:
-                        self.poll_once(source_id)
-                    except Exception:
-                        log.exception("scheduler swallowed a failure",
-                                      context={"source": source_id})
-                    self._due[source_id] = time.time() + interval
+            for source_id in self._due_sources(now, interval):
+                try:
+                    self.poll_once(source_id)
+                except Exception:
+                    log.exception("scheduler swallowed a failure",
+                                  context={"source": source_id})
+                self._last[source_id] = time.time()
             if now >= self._enrich_due:
                 queued = self._sweep_enrichment()
                 self._enrich_due = time.time() + (

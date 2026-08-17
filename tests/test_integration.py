@@ -674,6 +674,40 @@ class Endpoints(Base):
                 self.assertEqual(client.get(path).status_code, 404)
 
 
+class OpeningThePageShortensTheWait(Base):
+    """Going hot brings the next poll forward instead of waiting out the cold one.
+
+    Reported as loves taking too long to arrive. The cold tier is ten minutes,
+    and the next poll used to be scheduled the moment the previous one finished,
+    so the ten minutes were already committed to. Opening the page dropped the
+    interval to thirty seconds and changed nothing about when the source would
+    actually be read.
+    """
+
+    def a_scheduler(self):
+        from libwish.runtime import Scheduler
+        return Scheduler(self.svc, {"lastfm": object()})
+
+    def test_a_source_polled_on_the_cold_tier_is_due_as_soon_as_it_is_hot(self):
+        sched = self.a_scheduler()
+        now = 10_000.0
+        sched._last["lastfm"] = now - 60          # a minute ago, on the cold tier
+        self.assertEqual(sched._due_sources(now, 600), [])       # not due cold
+        self.assertEqual(sched._due_sources(now, 30), ["lastfm"])  # due the moment it is hot
+
+    def test_a_source_just_polled_is_not_polled_again_on_the_next_tick(self):
+        # The other half: reading backwards from the last poll must not turn
+        # into polling every tick.
+        sched = self.a_scheduler()
+        now = 10_000.0
+        sched._last["lastfm"] = now - 5
+        self.assertEqual(sched._due_sources(now, 30), [])
+
+    def test_a_source_never_polled_is_due_immediately(self):
+        sched = self.a_scheduler()
+        self.assertEqual(sched._due_sources(10_000.0, 600), ["lastfm"])
+
+
 class Ingest(Base):
     def love(self, artist, title, source="lastfm", item="i1"):
         return LovedTrack(source_id=source, source_item_id=item, loved_at=1786300000,
