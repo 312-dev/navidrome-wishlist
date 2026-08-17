@@ -684,6 +684,58 @@ def search(track_id: int):
                     "links": _buy_links(svc, row)})
 
 
+@bp.post("/import")
+def import_purchases():
+    """File audio files bought somewhere with no API to read.
+
+    Done inline rather than queued. Everything expensive about a claim is the
+    part that talks to a store, and there is no store here: the bytes are
+    already on this machine by the time the route runs, and what is left is a
+    signature check and a rename. The reader also needs to be told per file what
+    happened to it, which a job id cannot say.
+
+    One response per file, in the order they were sent, whether or not each one
+    worked. A partial success is the normal case when a folder is dropped, and a
+    request that failed as a whole because one file was a PDF would make the
+    reader sort the folder by hand before trying again.
+    """
+    svc = _svc()
+    files = [f for f in request.files.getlist("files") if f and f.filename]
+    if not files:
+        return jsonify({"error": "send one or more files as `files`"}), 400
+
+    from ..importer import ImportRefused, import_file
+
+    results = []
+    for upload in files:
+        name = Path(upload.filename).name
+        # Named for this request, not for the upload. A filename arrives from
+        # the reader's disk and `staged()` is what keeps it from meaning
+        # anything on ours; two files of the same name in one drop still need
+        # to be two files while they are being checked.
+        staged = svc.paths.staged(f"upload-{len(results)}-{name}")
+        try:
+            upload.save(staged)
+            filed = import_file(svc, staged, original_name=name)
+        except ImportRefused as exc:
+            results.append({"file": name, "ok": False, "msg": str(exc)})
+            continue
+        except Exception as exc:
+            log.exception("an upload could not be filed", context={"file": name})
+            svc.paths.discard(staged)
+            results.append({"file": name, "ok": False,
+                            "msg": f"{type(exc).__name__}: {exc}"})
+            continue
+        results.append({"file": name, "ok": True, "track_id": filed.track_id,
+                        "artist": filed.artist, "title": filed.title,
+                        "format": filed.fmt, "already_held": filed.already_held})
+
+    filed_count = sum(1 for r in results if r["ok"])
+    log.info("filed uploaded purchases",
+             context={"sent": len(files), "filed": filed_count})
+    return jsonify({"ok": True, "filed": filed_count, "results": results}), 200
+
+
 @bp.post("/scan")
 def scan():
     """Ask the music server to rescan, on demand."""

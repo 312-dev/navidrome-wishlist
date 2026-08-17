@@ -358,11 +358,99 @@
     flex-basis: 100%;
     margin: 6px 0 0;
     text-align: right;
-    color: var(--ink-soft);
+    color: var(--fade);
     font-size: var(--t-small);
   }
 
   .masthead__said:empty { display: none; }
+
+  /* Quieter than the sweep beside it. One is the routine act on a page about
+     buying music; this is for the shop that cannot be read, which is the
+     exception. Same height and the same gap so the pair reads as one control
+     group rather than two decisions. */
+  .masthead__add {
+    align-self: center;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 14px;
+    font-weight: 500;
+    color: var(--fade);
+    border: 1px solid transparent;
+    border-radius: var(--radius);
+    cursor: pointer;
+  }
+
+  .masthead__add:hover { background: var(--sleeve); color: var(--ink); }
+
+  /* The input is what focus lands on and it is off-screen, so the ring has to
+     be drawn by the label that stands in for it. */
+  .masthead__add:has(input:focus-visible) {
+    outline: 2px solid var(--ink);
+    outline-offset: 2px;
+  }
+
+  .masthead__add.is-busy { opacity: 0.55; cursor: default; }
+
+  /* What an import did. Shaped like a banner because it is one, but it is the
+     answer to something the reader just did rather than news about the app, so
+     it sits under the masthead that started it instead of at the top. */
+  .imported {
+    margin-top: 8px;
+    padding: 10px 16px;
+    background: var(--sleeve);
+    border-top: 2px solid var(--fade);
+    border-bottom: 1px solid var(--rule);
+    font-size: var(--t-sub);
+    text-wrap: pretty;
+  }
+
+  .imported[hidden] { display: none; }
+  .imported__said { margin: 0; }
+
+  /* Each entry is a file that could not be filed and the sentence saying why.
+     Bulleted rather than run together: they are separate problems with
+     separate files, and one paragraph of four of them reads as one problem. */
+  .imported__list {
+    margin: 6px 0 0;
+    padding-left: 18px;
+    list-style: disc;
+    color: var(--fade);
+  }
+
+  .imported__list:empty { display: none; }
+  .imported__list li { margin-top: 2px; }
+  .imported > .btn { margin-top: 8px; }
+
+  /* Only ever visible while files are being dragged over the window, which is
+     why it can cover the page: at that moment there is nothing under it the
+     reader is trying to use. Below the skip link, which must stay reachable. */
+  .drop {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    display: grid;
+    place-items: center;
+    background: color-mix(in srgb, var(--stock) 88%, transparent);
+  }
+
+  .drop[hidden] { display: none; }
+
+  .drop__say {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    margin: 24px;
+    padding: 28px 36px;
+    color: var(--ink);
+    font-size: var(--t-title);
+    font-weight: 500;
+    /* Dashed, and the only dashed border in the interface. It is the one
+       element that is a target rather than a surface. */
+    border: 2px dashed var(--rule-firm);
+    border-radius: var(--radius-xl);
+    background: var(--sleeve);
+  }
 
   /* The bar has to be allowed to wrap before anything inside it can take a
      line of its own, or the tabs and the controls beside them squeeze rather

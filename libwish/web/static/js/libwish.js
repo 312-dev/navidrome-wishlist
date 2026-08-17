@@ -1065,6 +1065,171 @@
       .catch(function () { syncBusy(false, 'Could not reach the server.'); });
   }
 
+  /* ------------------------------------------------------------------ *
+   * importing files bought elsewhere
+   *
+   * iTunes hands over a file and keeps no record worth reading, so the file is
+   * the purchase. This uploads whatever was dropped or chosen and reports on
+   * each one: the rows themselves arrive over the ordinary event stream, the
+   * same way a claim's do, so nothing here inserts anything into the list.
+   *
+   * The window is the drop target. A zone to aim at is one more thing to find,
+   * and the files are already being dragged over the page from a Finder window.
+   * ------------------------------------------------------------------ */
+
+  function importBusy(on) {
+    var label = $('.masthead__add');
+    var input = $('#import-files');
+    if (label) label.classList.toggle('is-busy', !!on);
+    if (input) input.disabled = !!on;
+  }
+
+  /* One sentence for the whole drop, then a line per file that could not be
+     filed. The counts come first because that is the question ("did it work?");
+     the failures are what is left to do something about. */
+  function importSaid(body) {
+    var results = (body && body.results) || [];
+    var filed = results.filter(function (r) { return r.ok && !r.already_held; });
+    var held = results.filter(function (r) { return r.ok && r.already_held; });
+    var failed = results.filter(function (r) { return !r.ok; });
+    var parts = [];
+    if (filed.length) parts.push('Added ' + filed.length + (filed.length === 1 ? ' track.' : ' tracks.'));
+    if (held.length) parts.push(held.length + (held.length === 1 ? ' was' : ' were') + ' already in your library.');
+    if (failed.length) parts.push(failed.length + ' could not be read.');
+    if (!parts.length) parts.push('Nothing was sent.');
+    return { said: parts.join(' '), failed: failed };
+  }
+
+  function showImported(said, failed) {
+    var box = $('#imported');
+    var line = $('#imported-said');
+    var list = $('#imported-failed');
+    if (!box || !line || !list) return;
+    line.textContent = said;
+    list.textContent = '';
+    /* The message names its own file, because the same sentence is what an API
+       caller gets back with no list around it to say which file it is about.
+       Printing the name again beside it read as a stutter. */
+    (failed || []).forEach(function (r) {
+      var li = document.createElement('li');
+      li.textContent = r.msg || (r.file + ' could not be read.');
+      list.appendChild(li);
+    });
+    box.hidden = false;
+    say(said);
+  }
+
+  function sendFiles(files) {
+    var list = Array.prototype.slice.call(files || []);
+    if (!list.length) return;
+    var form = new FormData();
+    list.forEach(function (f) { form.append('files', f, f.name); });
+    importBusy(true);
+    showImported('Adding ' + list.length + (list.length === 1 ? ' file...' : ' files...'), []);
+    fetch('/api/import', {
+      method: 'POST',
+      headers: { 'X-Requested-With': 'libwish' },
+      body: form
+    })
+      .then(function (r) {
+        /* A 413 is answered by the server before the body is read, and its
+           reply is an HTML page rather than the JSON every other route sends,
+           so it is named here rather than left to fail as a parse error. */
+        if (r.status === 413) throw new Error('That is more than one upload can carry.');
+        return r.json();
+      })
+      .then(function (body) {
+        var out = importSaid(body);
+        showImported(out.said, out.failed);
+      })
+      .catch(function (err) {
+        showImported(err.message || 'Could not reach the server.', []);
+      })
+      .then(function () { importBusy(false); });
+  }
+
+  /* Drag events fire per element, so entering a child looks like leaving the
+     parent. Counting them is what keeps the overlay from flickering off as the
+     pointer crosses a row on its way down the page. */
+  var dragDepth = 0;
+
+  function draggingFiles(e) {
+    var dt = e.dataTransfer;
+    if (!dt) return false;
+    var types = dt.types || [];
+    return Array.prototype.indexOf.call(types, 'Files') !== -1;
+  }
+
+  function showDrop(on) {
+    var zone = $('#drop');
+    if (zone) zone.hidden = !on;
+  }
+
+  function wireImport() {
+    var input = $('#import-files');
+    if (input) {
+      input.addEventListener('change', function () {
+        sendFiles(input.files);
+        /* Cleared so that choosing the same file twice still fires a change.
+           Dropping a file, deciding it went to the wrong place and picking it
+           again is a real sequence, and silence is the worst answer to it. */
+        input.value = '';
+      });
+    }
+
+    var dismiss = $('#imported-dismiss');
+    if (dismiss) {
+      dismiss.addEventListener('click', function () {
+        var box = $('#imported');
+        if (box) box.hidden = true;
+      });
+    }
+
+    window.addEventListener('dragenter', function (e) {
+      if (!draggingFiles(e)) return;
+      e.preventDefault();
+      dragDepth += 1;
+      showDrop(true);
+    });
+
+    window.addEventListener('dragover', function (e) {
+      if (!draggingFiles(e)) return;
+      /* Without this the browser navigates to the file, which throws the page
+         away along with whatever was mid-decision on it. */
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'copy';
+    });
+
+    window.addEventListener('dragleave', function () {
+      dragDepth = Math.max(0, dragDepth - 1);
+      if (!dragDepth) showDrop(false);
+    });
+
+    window.addEventListener('drop', function (e) {
+      if (!draggingFiles(e)) return;
+      e.preventDefault();
+      dragDepth = 0;
+      showDrop(false);
+      sendFiles(e.dataTransfer.files);
+    });
+
+    /* A drag abandoned outside the window does not always come back as a
+       leave, and the count would then never reach zero. What is at stake is
+       not tidiness: this element covers the entire page, so one missed event
+       leaves the application unusable until a reload. */
+    window.addEventListener('dragend', function () {
+      dragDepth = 0;
+      showDrop(false);
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && dragDepth) {
+        dragDepth = 0;
+        showDrop(false);
+      }
+    });
+  }
+
   /* One sentence per phase, from the phase name and its own payload. Written
      once and called from two places: the live stream, and the restore below
      that reads the same pair back off the job row after a navigation. Two
@@ -1147,6 +1312,7 @@
     var syncBtn = $('#sync-purchases');
     if (syncBtn) syncBtn.addEventListener('click', startSync);
     restoreSync();
+    wireImport();
 
     var island = $('#claim-stages');
     if (island) {

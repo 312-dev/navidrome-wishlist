@@ -79,9 +79,42 @@
             aria-label="Sync purchases" aria-describedby="sync-said">
       {{ ic.icon('refresh', 15) }}<span>Purchases</span>
     </button>
+    {#- For a shop with nothing to read. iTunes sells a file and then forgets
+        the transaction ever happened, so the file itself is the only evidence
+        the purchase exists, and handing it over is the whole import.
+
+        A real file input rather than a button that opens one, because the
+        input is what a keyboard reaches and what a screen reader announces.
+        The label is the control; the input is hidden from sight only. -#}
+    <label class="masthead__add" for="import-files">
+      {{ ic.icon('upload', 15) }}<span>Add files</span>
+      <input type="file" id="import-files" class="sr-only" multiple
+             accept=".m4a,.m4b,.flac,.mp3,audio/*">
+    </label>
     <p class="masthead__said" id="sync-said" role="status" aria-live="polite"></p>
   </div>
 </header>
+
+{#- What an import did, until it is dismissed. Not a toast: a file that could
+    not be read is a sentence someone has to act on, and four of them at once is
+    a list to work through rather than something to catch as it goes past. -#}
+<div class="shell">
+  <div class="imported" id="imported" role="status" aria-live="polite" hidden>
+    <p class="imported__said" id="imported-said"></p>
+    <ul class="imported__list" id="imported-failed"></ul>
+    <button type="button" class="btn" data-variant="ghost" data-size="sm" id="imported-dismiss">
+      Dismiss
+    </button>
+  </div>
+</div>
+
+{#- The drop target is the window. A zone to aim at would be one more thing to
+    find, and the files are already being dragged from a Finder window over the
+    top of the page. Inert until a drag carrying files enters, so it never sits
+    between the reader and a row. -#}
+<div class="drop" id="drop" hidden>
+  <p class="drop__say">{{ ic.icon('upload', 22) }} Drop purchased files to add them</p>
+</div>
 
 {#- Both banners are persistent and both name the consequence rather than the
     fault. Neither is a toast: a toast is gone before the sentence is read. -#}

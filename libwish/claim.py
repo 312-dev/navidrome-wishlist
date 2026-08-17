@@ -27,7 +27,7 @@ import subprocess
 import time
 from typing import Any, Sequence
 
-from . import identity, match
+from . import identity, match, tags
 from .errors import (
     LibwishError, MatchRefused, StoreAuthError, VerificationFailed,
 )
@@ -40,16 +40,25 @@ log = get("claim")
 # Formats to ask a store for, best first.
 PREFER: tuple[str, ...] = ("flac", "mp3")
 
-# Leading bytes that identify real audio. An HTML error page matches none of
-# them, which is the case this exists to catch.
+# Bytes that identify real audio, and where in the file to find them. An HTML
+# error page matches none of them, which is the case this exists to catch.
+#
+# MP4 is the one format whose signature is not at the front: the file opens with
+# the size of its first box and only then says `ftyp`. The brand after that
+# separates an audio file from a video one, and both are `ftyp` at four.
 MAGIC = (
-    (b"fLaC", "flac"),
-    (b"ID3", "mp3"),
-    (b"\xff\xfb", "mp3"),
-    (b"\xff\xf3", "mp3"),
-    (b"\xff\xf2", "mp3"),
-    (b"OggS", "ogg"),
+    (0, b"fLaC", "flac"),
+    (0, b"ID3", "mp3"),
+    (0, b"\xff\xfb", "mp3"),
+    (0, b"\xff\xf3", "mp3"),
+    (0, b"\xff\xf2", "mp3"),
+    (0, b"OggS", "ogg"),
+    (4, b"ftyp", "m4a"),
 )
+
+# How far in the signature check reads. Twelve bytes covers an `ftyp` brand,
+# which is the deepest anything here looks.
+HEAD_BYTES = 12
 
 MIN_BYTES = 100_000
 
@@ -82,29 +91,55 @@ def _describe(ident) -> dict:
     return {"repr": str(ident)[:500]}
 
 
-def verify_audio(path, *, min_bytes: int = MIN_BYTES) -> str:
+#: What an unrecognised file probably is, when the file came from a store. A
+#: shop that has logged you out answers a download with its sign-in page and
+#: HTTP 200, which is the single most likely thing to be holding.
+FROM_A_STORE = "the store may have returned an error page"
+
+
+def verify_audio(path, *, min_bytes: int = MIN_BYTES, name: str = "",
+                 hint: str = FROM_A_STORE) -> str:
     """Confirm a downloaded file is audio. Returns the detected format.
 
     Deliberately checks the bytes rather than the extension. The filename comes
     from the store, so trusting it would mean trusting the same source that just
     handed us the file.
+
+    `name` is what to call the file when saying what is wrong with it. A staged
+    file is named for the transfer rather than for itself, and a refusal naming
+    that is a refusal about a file the reader has never seen.
+
+    `hint` is the likely cause, which depends on where the file came from and
+    not on what is wrong with it. A download that is not audio is usually a
+    sign-in page; a file someone dragged in is usually the wrong file.
     """
+    shown = name or path.name
     if not path.is_file():
         raise VerificationFailed(f"{path} is not a file")
     size = path.stat().st_size
     if size < min_bytes:
         head = path.read_bytes()[:120].decode("utf-8", "replace")
         raise VerificationFailed(
-            f"{path.name} is only {size} bytes, too small to be audio. Starts with: {head!r}"
+            f"{shown} is only {size} bytes, too small to be audio. Starts with: {head!r}"
         )
     with open(path, "rb") as fh:
-        head = fh.read(8)
-    for magic, fmt in MAGIC:
-        if head.startswith(magic):
-            return fmt
+        head = fh.read(HEAD_BYTES)
+    for offset, magic, fmt in MAGIC:
+        if head[offset:offset + len(magic)] != magic:
+            continue
+        # An MP4 brand does not settle it. A music video and a purchased song
+        # are both `ftyp`, and iTunes has sold both, so the answer comes from
+        # the track handler rather than from the four characters after it.
+        if fmt == "m4a" and not tags.has_audio_track(path):
+            raise VerificationFailed(
+                f"{shown} is an MP4 container with no audio track "
+                f"(brand {head[8:12].decode('ascii', 'replace')!r}); a music video "
+                f"is not something this can file"
+            )
+        return fmt
     raise VerificationFailed(
-        f"{path.name} does not begin with any known audio signature "
-        f"(first bytes {head[:8]!r}); the store may have returned an error page"
+        f"{shown} does not begin with any known audio signature "
+        f"(first bytes {head[:8]!r}); {hint}"
     )
 
 

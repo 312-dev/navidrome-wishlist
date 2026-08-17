@@ -34,6 +34,13 @@ rather buy simply lose track of what they meant to buy. This is the list.
   from every shop in parallel and files everything on the list it recognises,
   so buying five records in one go does not mean marking off five records one
   at a time.
+- **Takes a file from a shop it cannot read.** iTunes sells you an m4a and
+  keeps no history worth reading, so hand over the file instead: drop it on the
+  page, or use Add files. It is identified from its own tags, filed into the
+  library under the same layout as everything else, and then enriched from the
+  same places every other row is, so it ends up describing itself the same way.
+  A track already on the want list turns owned rather than becoming a second
+  copy of itself.
 - **Refuses when it is not sure.** A download only happens when the purchase
   matches the track you wanted, on artist, title and length. Anything short of
   that is shown to you with the candidate it rejected and the score it gave,
@@ -54,7 +61,8 @@ record, in your own browser, from the shop. This finds it afterwards.
 
 Not a downloader. Every file it fetches is one already sitting in your own
 purchase history, retrieved with your own logged-in session. Point it at an
-account and it can only ever see what that account bought.
+account and it can only ever see what that account bought. The one file it does
+not fetch is the one you hand it, which it can only file where you put it.
 
 ## Running it
 

@@ -74,6 +74,11 @@ def create_app(settings: Settings | None = None, *, start_workers: bool = True) 
         log.info("cleared unfinished downloads", context={"files": swept})
 
     app = Flask(__name__)
+    # A ceiling on an upload, high enough for a dropped album of lossless files
+    # and low enough that a mis-drop cannot fill the music volume before anyone
+    # notices. Flask answers past it with 413 before reading the body, so the
+    # bytes are refused rather than written and then deleted.
+    app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024
     app.extensions["libwish"] = Services(
         settings=settings, db=db_factory, tracks=TrackRepo(db_factory),
         bus=bus, jobs=jobs, paths=paths, version=__version__,
