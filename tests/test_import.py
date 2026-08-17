@@ -38,7 +38,18 @@ class Base(unittest.TestCase):
         self.client = self.app.test_client()
         self.music = Path(os.environ["LW_MUSIC_DIR"])
 
+        # No artwork lookup unless a test asks for one. Left live, every import
+        # here reaches Apple and Deezer over the network, which makes the suite
+        # slow, flaky and dependent on what those two happen to carry today:
+        # the first run of this wrote a real Percy Sledge sleeve into a
+        # temporary directory from the live Deezer.
+        import libwish.artwork as art
+        self._real_lookup = art.for_imported_file
+        art.for_imported_file = lambda http, path, found: ""
+
     def tearDown(self):
+        import libwish.artwork as art
+        art.for_imported_file = self._real_lookup
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def song(self, artist, title, album="", *, pad=PADDING, ftyp=b"M4A "):
@@ -132,6 +143,83 @@ class ADroppedPurchaseBecomesAnOwnedTrack(Base):
         self.assertEqual([r["title"] for r in body["results"]],
                          ["Pon de Replay", "Apologize", "Going Where the Lonely Go"])
         self.assertEqual(len(self.owned()), 3)
+
+
+class TheSleeveForAFileThatHasNone(Base):
+    """An iTunes purchase carries no artwork, so the import goes and finds it.
+
+    Two destinations, because they are two readers. The cache is what the want
+    list draws. The file beside the audio is what a music server reads, and it
+    reads the file rather than asking this application anything: without it, a
+    purchased track sits in Navidrome as a blue placeholder.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.asked = []
+        import libwish.artwork as art
+
+        def fake_for_imported_file(http, path, found):
+            self.asked.append((str(path), found.artist, found.album))
+            return "https://apple.test/1000x1000bb.jpg" if found.album else ""
+
+        # Over the top of the Base's do-nothing stub, which tearDown restores.
+        art.for_imported_file = fake_for_imported_file
+
+        # The cover cache does its own fetching, so that is stubbed too: what
+        # is under test is where the bytes end up, not how they were fetched.
+        from libwish.media import CoverCache
+        self.real_ensure = CoverCache.ensure
+
+        def fake_ensure(cache, track_id, url):
+            # Past media.MIN_BYTES, which is the floor that catches an error
+            # page served where an image was asked for.
+            return cache.store(track_id, b"\xff\xd8\xff\xe0" + b"\x00" * 400)
+
+        CoverCache.ensure = fake_ensure
+
+    def tearDown(self):
+        from libwish.media import CoverCache
+        CoverCache.ensure = self.real_ensure
+        super().tearDown()
+
+    def test_a_cover_lands_beside_the_audio_for_the_music_server(self):
+        self.send(("01 TalkTalk.m4a", self.song("A Perfect Circle", "TalkTalk",
+                                                "Eat the Elephant")))
+        self.assertEqual(
+            self.library(),
+            ["A Perfect Circle/Eat the Elephant/TalkTalk.m4a",
+             "A Perfect Circle/Eat the Elephant/cover.jpg"])
+
+    def test_the_want_list_gets_the_same_picture(self):
+        self.send(("01 TalkTalk.m4a", self.song("A Perfect Circle", "TalkTalk",
+                                                "Eat the Elephant")))
+        track_id = self.owned()[0]["id"]
+        from libwish.enrich import cover_cache
+        self.assertTrue(cover_cache(self.svc).exists(track_id))
+
+    def test_the_file_itself_is_never_rewritten(self):
+        # A purchased file comes out byte for byte the way the shop sold it.
+        # Embedding artwork would be the one place this application edits audio.
+        blob = self.song("A Perfect Circle", "TalkTalk", "Eat the Elephant")
+        self.send(("01 TalkTalk.m4a", blob))
+        landed = self.music / "A Perfect Circle" / "Eat the Elephant" / "TalkTalk.m4a"
+        self.assertEqual(landed.read_bytes(), blob)
+
+    def test_a_cover_already_in_the_folder_is_left_alone(self):
+        folder = self.music / "A Perfect Circle" / "Eat the Elephant"
+        folder.mkdir(parents=True)
+        (folder / "cover.jpg").write_bytes(b"chosen by hand")
+        self.send(("01 TalkTalk.m4a", self.song("A Perfect Circle", "TalkTalk",
+                                                "Eat the Elephant")))
+        self.assertEqual((folder / "cover.jpg").read_bytes(), b"chosen by hand")
+
+    def test_no_cover_found_still_files_the_track(self):
+        # Artwork is the most optional thing here. The purchase is recorded and
+        # the file is in the library before anything asks about a picture.
+        res = self.send(("x.m4a", self.song("Someone", "Untitled")))
+        self.assertTrue(res.get_json()["results"][0]["ok"])
+        self.assertEqual(len(self.owned()), 1)
 
 
 class WhatItRefuses(Base):

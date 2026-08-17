@@ -41,10 +41,16 @@ _ARTIST = b"\xa9ART"
 _ALBUM = b"\xa9alb"
 _ALBUM_ARTIST = b"aART"
 
-#: `data` payload types. Only text is read; the artwork atom is a JPEG and the
-#: track number is a packed pair, and neither identifies anything the name does
-#: not say better.
+#: Apple's own id for the release a purchased track belongs to. iTunes writes
+#: it into every file it sells, which makes it the one identifier here that
+#: was put in by the seller rather than inferred from a name.
+_COLLECTION = b"plID"
+
+#: `data` payload types. Only text and integers are read; the artwork atom is a
+#: JPEG and the track number is a packed pair, and neither identifies anything
+#: the name does not say better.
 _TEXT_TYPES = (1, 18)
+_INT_TYPES = (21, 22)
 
 #: A box type is four printable ASCII bytes, give or take the 0xA9 prefix. Used
 #: to tell a real child list from four bytes of version and flags.
@@ -88,6 +94,42 @@ def read(path: Path | str) -> FileTags:
     artist = items.get(_ARTIST) or items.get(_ALBUM_ARTIST, "")
     return FileTags(artist=artist, title=items.get(_TITLE, ""),
                     album=items.get(_ALBUM, ""))
+
+
+def apple_collection_id(path: Path | str) -> int | None:
+    """Apple's id for the release this file was sold as part of, if it says.
+
+    Worth reading for one reason: an iTunes purchase usually carries no artwork
+    of its own, and this is the seller's own pointer at the release it belongs
+    to. Looking a cover up by it asks nobody to match anything, which is the
+    difference between the right sleeve and a plausible one.
+
+    None for anything not bought from Apple.
+    """
+    try:
+        with open(path, "rb") as fh:
+            blob = fh.read(MAX_SCAN)
+    except OSError:
+        return None
+    ilst = _find(blob, (b"moov", b"udta", b"meta", b"ilst"))
+    if ilst is None:
+        return None
+    for kind, item_start, item_end in _boxes(blob, *ilst):
+        if kind != _COLLECTION:
+            continue
+        for inner, data_start, data_end in _boxes(blob, item_start, item_end):
+            if inner != b"data" or data_start + 8 > data_end:
+                continue
+            (type_code,) = struct.unpack(">I", blob[data_start:data_start + 4])
+            if (type_code & 0xFFFFFF) not in _INT_TYPES:
+                continue
+            raw = blob[data_start + 8:data_end]
+            # Apple writes this as four or eight bytes depending on the file.
+            if 0 < len(raw) <= 8:
+                value = int.from_bytes(raw, "big")
+                if value:
+                    return value
+    return None
 
 
 def has_audio_track(path: Path | str) -> bool:
@@ -224,4 +266,5 @@ def _items(blob: bytes, start: int, end: int) -> dict[bytes, str]:
     return out
 
 
-__all__ = ["FileTags", "MAX_SCAN", "from_filename", "read"]
+__all__ = ["FileTags", "MAX_SCAN", "apple_collection_id", "from_filename",
+           "has_audio_track", "read"]

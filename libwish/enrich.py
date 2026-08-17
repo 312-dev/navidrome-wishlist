@@ -128,7 +128,7 @@ class Throttle:
 DEEZER = Throttle()
 
 
-def _client(svc: Any) -> HttpClient:
+def http_client(svc: Any) -> HttpClient:
     settings = getattr(svc, "settings", None)
     return HttpClient(
         user_agent=getattr(settings, "http_user_agent", "library-wishlist/1.0 (+self-hosted)"),
@@ -137,7 +137,7 @@ def _client(svc: Any) -> HttpClient:
     )
 
 
-def _covers(svc: Any) -> CoverCache:
+def cover_cache(svc: Any) -> CoverCache:
     settings = getattr(svc, "settings", None)
     return CoverCache(
         settings.config_dir,
@@ -330,7 +330,7 @@ def enrich_track(svc: Any, track_id: int, *, http: HttpClient | None = None,
     if track is None:
         raise LibwishError(f"track {track_id} no longer exists")
 
-    cache = covers if covers is not None else _covers(svc)
+    cache = covers if covers is not None else cover_cache(svc)
     have_duration = track.get("duration_ms") is not None
     cached = cache.path_for(track_id)
     if have_duration and cached is not None:
@@ -338,7 +338,7 @@ def enrich_track(svc: Any, track_id: int, *, http: HttpClient | None = None,
                 "duration_ms": track["duration_ms"], "cover": str(cached),
                 "detail": "already enriched"}
 
-    rows = search(http or _client(svc), track["artist"] or "", track["title"] or "",
+    rows = search(http or http_client(svc), track["artist"] or "", track["title"] or "",
                   throttle=throttle)
     want = identity.build_identity(track["artist"] or "", track["title"] or "")
     decision, index, accepted, detail, cover_ok = choose(want, rows)
@@ -466,7 +466,7 @@ def pending(svc: Any, limit: int = 25, *, covers: CoverCache | None = None,
     until `RETRY_AFTER_S` has passed, which is what keeps a track Deezer simply
     does not carry from consuming a slot on every sweep forever.
     """
-    cache = covers if covers is not None else _covers(svc)
+    cache = covers if covers is not None else cover_cache(svc)
     cutoff = (now if now is not None else int(time.time())) - RETRY_AFTER_S
     conn = svc.db()
     try:
@@ -516,7 +516,7 @@ def make_handler(svc: Any, *, http: HttpClient | None = None,
     Built here and registered there, so this module never has to know whether a
     job queue exists, and a test can call `enrich_track` without one.
     """
-    shared_covers = covers if covers is not None else _covers(svc)
+    shared_covers = covers if covers is not None else cover_cache(svc)
 
     def handler(job, progress) -> dict:
         if job.track_id is None:

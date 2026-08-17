@@ -718,6 +718,11 @@ def import_purchases():
             upload.save(staged)
             filed = import_file(svc, staged, original_name=name)
         except ImportRefused as exc:
+            # Logged, because the reason otherwise exists only in the reply and
+            # the reply is gone the moment the page is. "Why did that one not
+            # take?" is the first question asked about an import, and the log
+            # is where it gets asked.
+            log.info("an upload was refused", context={"file": name, "why": str(exc)})
             results.append({"file": name, "ok": False, "msg": str(exc)})
             continue
         except Exception as exc:

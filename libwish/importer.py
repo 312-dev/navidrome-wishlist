@@ -10,10 +10,13 @@ the same signature check, the same library layout, the same atomic publish, the
 same enrichment queue. A file dropped here ends up indistinguishable from one
 this application fetched itself, which is the whole point of accepting it.
 
-The file's own tags are read only to say which track it is. They are not kept:
-what the plate shows and what the row says come from the same enrichment every
-other row gets, so an iTunes purchase and a Qobuz one describe themselves the
-same way rather than in Apple's words.
+The file's own tags are read to say which track it is, and to ask after its
+sleeve. Neither is kept as the row's description: what the plate shows and what
+the row says come from the same enrichment every other row gets, so an iTunes
+purchase and a Qobuz one describe themselves the same way rather than in
+Apple's words. Artwork is the exception, and only because Apple sells a file
+with none in it; see `artwork.py` for why the seller's own release id is a
+better answer there than any search.
 """
 
 from __future__ import annotations
@@ -23,7 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import enrich, identity, tags
+from . import artwork, enrich, identity, tags
 from .claim import rescan, verify_audio  # the same check a download passes
 from .db import transaction
 from .errors import LibwishError, VerificationFailed
@@ -82,6 +85,9 @@ def import_file(svc: Any, staged: Path, *, original_name: str = "",
     try:
         fmt = _verified(staged, shown)
         found = _identify(staged, original_name)
+        # Read before publishing, because publishing is a rename and this file
+        # is about to stop being at this path.
+        apple_id = tags.apple_collection_id(staged)
         track_id, fresh = _row_for(svc, found)
         dest, already_held = _publish(svc, staged, found, fmt)
     except Exception:
@@ -92,6 +98,7 @@ def import_file(svc: Any, staged: Path, *, original_name: str = "",
     log.info("filed an uploaded purchase",
              context={"track": track_id, "store": store_id, "format": fmt,
                       "held": already_held})
+    _artwork(svc, track_id, dest, found, apple_id)
 
     # The row is new to every other part of the application, so it is announced
     # as one. An existing row that was on the want list has changed status, and
@@ -205,6 +212,35 @@ def _publish(svc: Any, staged: Path, found: tags.FileTags, fmt: str) -> tuple[Pa
         log.info("already in the library", context={"dest": str(dest)})
         return dest, True
     return dest, False
+
+
+def _artwork(svc: Any, track_id: int, dest: Path, found: tags.FileTags,
+             apple_id: int | None) -> None:
+    """Find this track a sleeve, and leave one where the music server looks.
+
+    Two places, because they are two different readers. The cache is what the
+    want list draws; the file beside the audio is what a music server reads,
+    and it reads the file rather than asking this application anything.
+
+    Never fatal. The track is filed and the purchase is recorded before this
+    runs, and a missing picture is not a reason to report that a purchase
+    failed.
+    """
+    covers = enrich.cover_cache(svc)
+    cached = covers.path_for(track_id)
+    if cached is None:
+        url = artwork.for_imported_file(enrich.http_client(svc), dest, found) if (
+            apple_id or found.album) else ""
+        if not url:
+            return
+        try:
+            cached = covers.ensure(track_id, url)
+        except (LibwishError, OSError) as exc:
+            log.info("cover not cached",
+                     context={"track": track_id, "err": f"{type(exc).__name__}: {exc}"})
+            return
+        svc.bus.publish("track.updated", id=track_id, fields={"cover": True})
+    artwork.write_folder_cover(cached, dest.parent)
 
 
 def _item_key(name: str) -> str:

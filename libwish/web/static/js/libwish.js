@@ -1119,33 +1119,65 @@
     say(said);
   }
 
+  /* XMLHttpRequest rather than fetch, for one reason: fetch cannot report how
+     much of a request body has gone. An album of lossless files is minutes of
+     upload, and a line reading "Adding 1 file..." for all of it is
+     indistinguishable from one that has hung. It was, in fact, mistaken for
+     one. */
   function sendFiles(files) {
     var list = Array.prototype.slice.call(files || []);
     if (!list.length) return;
     var form = new FormData();
     list.forEach(function (f) { form.append('files', f, f.name); });
+
+    var noun = list.length === 1 ? ' file' : ' files';
     importBusy(true);
-    showImported('Adding ' + list.length + (list.length === 1 ? ' file...' : ' files...'), []);
-    fetch('/api/import', {
-      method: 'POST',
-      headers: { 'X-Requested-With': 'libwish' },
-      body: form
-    })
-      .then(function (r) {
-        /* A 413 is answered by the server before the body is read, and its
-           reply is an HTML page rather than the JSON every other route sends,
-           so it is named here rather than left to fail as a parse error. */
-        if (r.status === 413) throw new Error('That is more than one upload can carry.');
-        return r.json();
-      })
-      .then(function (body) {
-        var out = importSaid(body);
-        showImported(out.said, out.failed);
-      })
-      .catch(function (err) {
-        showImported(err.message || 'Could not reach the server.', []);
-      })
-      .then(function () { importBusy(false); });
+    showImported('Adding ' + list.length + noun + '...', []);
+
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/import');
+    xhr.setRequestHeader('X-Requested-With', 'libwish');
+
+    xhr.upload.addEventListener('progress', function (e) {
+      if (!e.lengthComputable) return;
+      var pct = Math.round((e.loaded / e.total) * 100);
+      /* The last percent is the longest: the bytes are up but the server is
+         still checking and filing them, and counting to 100 and stopping reads
+         as stuck all over again. */
+      var line = pct >= 100
+        ? 'Filing ' + list.length + noun + '...'
+        : 'Adding ' + list.length + noun + '... ' + pct + '%';
+      var out = $('#imported-said');
+      if (out) out.textContent = line;
+    });
+
+    xhr.addEventListener('load', function () {
+      importBusy(false);
+      /* A 413 is answered before the body is read, and answered with an HTML
+         page rather than the JSON every other route sends, so it is named
+         here rather than left to fail as a parse error. */
+      if (xhr.status === 413) {
+        showImported('That is more than one upload can carry.', []);
+        return;
+      }
+      var body;
+      try { body = JSON.parse(xhr.responseText); }
+      catch (e) { showImported('The server answered with something unreadable.', []); return; }
+      var out = importSaid(body);
+      showImported(out.said, out.failed);
+    });
+
+    xhr.addEventListener('error', function () {
+      importBusy(false);
+      showImported('Could not reach the server.', []);
+    });
+
+    xhr.addEventListener('abort', function () {
+      importBusy(false);
+      showImported('The upload was stopped.', []);
+    });
+
+    xhr.send(form);
   }
 
   /* Drag events fire per element, so entering a child looks like leaving the

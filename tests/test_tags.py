@@ -37,10 +37,19 @@ def text(kind: bytes, value: str) -> bytes:
     return box(kind, box(b"data", body))
 
 
-def ilst(**named: str) -> bytes:
+def number(kind: bytes, value: int, width: int = 8) -> bytes:
+    """An `ilst` entry holding an integer, which is how Apple writes its ids."""
+    body = struct.pack(">I", 21) + b"\x00" * 4 + value.to_bytes(width, "big")
+    return box(kind, box(b"data", body))
+
+
+def ilst(collection: int | None = None, **named: str) -> bytes:
     keys = {"title": b"\xa9nam", "artist": b"\xa9ART", "album": b"\xa9alb",
             "album_artist": b"aART"}
-    return box(b"ilst", b"".join(text(keys[k], v) for k, v in named.items()))
+    entries = [text(keys[k], v) for k, v in named.items()]
+    if collection is not None:
+        entries.append(number(b"plID", collection))
+    return box(b"ilst", b"".join(entries))
 
 
 def meta(children: bytes, *, full_box: bool = True) -> bytes:
@@ -52,13 +61,13 @@ def hdlr(handler: bytes) -> bytes:
     return box(b"hdlr", b"\x00" * 8 + handler)
 
 
-def a_song(ftyp: bytes = b"M4A ", **named: str) -> bytes:
+def a_song(ftyp: bytes = b"M4A ", collection: int | None = None, **named: str) -> bytes:
     """A minimal but structurally honest iTunes-shaped file."""
     return (
         box(b"ftyp", ftyp + b"\x00" * 4)
         + box(b"moov",
               box(b"trak", box(b"mdia", hdlr(b"soun")))
-              + box(b"udta", meta(ilst(**named))))
+              + box(b"udta", meta(ilst(collection, **named))))
         + box(b"mdat", b"\x00" * 64)
     )
 
@@ -140,6 +149,33 @@ class WhatAFileSaysAboutItself(Base):
         blob = (box(b"ftyp", b"M4A \x00\x00\x00\x00")
                 + struct.pack(">I", 2) + b"moov" + b"\x00" * 40)
         self.assertFalse(tags.read(self.written(blob)).identifies())
+
+
+class ApplesOwnReleaseId(Base):
+    """The one identifier in the file that was written by the seller.
+
+    Everything else here is a name that has to be matched against something.
+    This is a pointer, and it is what makes finding the right sleeve for a
+    purchase a lookup rather than a search.
+    """
+
+    def test_it_is_read_off_a_purchased_file(self):
+        path = self.written(a_song(collection=1471554984, title="TalkTalk",
+                                   artist="A Perfect Circle"))
+        self.assertEqual(tags.apple_collection_id(path), 1471554984)
+
+    def test_apple_writes_it_at_four_bytes_as_well_as_eight(self):
+        blob = (box(b"ftyp", b"M4A \x00\x00\x00\x00")
+                + box(b"moov", box(b"udta", meta(
+                    box(b"ilst", number(b"plID", 1471554984, width=4))))))
+        self.assertEqual(tags.apple_collection_id(self.written(blob)), 1471554984)
+
+    def test_a_file_from_anywhere_else_has_none(self):
+        path = self.written(a_song(title="Gosh", artist="Jamie xx"))
+        self.assertIsNone(tags.apple_collection_id(path))
+
+    def test_a_file_it_cannot_parse_has_none(self):
+        self.assertIsNone(tags.apple_collection_id(self.written(b"fLaC" + b"\x00" * 200)))
 
 
 class WhetherThereIsAudioInIt(Base):

@@ -41,6 +41,14 @@ rather buy simply lose track of what they meant to buy. This is the list.
   same places every other row is, so it ends up describing itself the same way.
   A track already on the want list turns owned rather than becoming a second
   copy of itself.
+
+  Apple sells a file with no artwork in it, so the sleeve is fetched separately
+  and written in beside the audio, where a music server looks. Apple's own
+  catalogue is asked first, by the release id the file carries, because that
+  asks nobody to match anything. Failing that it will take a Deezer album, but
+  only one whose artist and title both agree: asked for a record Deezer does
+  not carry, it offers a different one by the same artist, and a confidently
+  wrong sleeve is worse than an empty square.
 - **Refuses when it is not sure.** A download only happens when the purchase
   matches the track you wanted, on artist, title and length. Anything short of
   that is shown to you with the candidate it rejected and the score it gave,
