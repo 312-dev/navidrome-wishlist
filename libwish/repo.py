@@ -165,6 +165,43 @@ class TrackRepo:
         finally:
             conn.close()
 
+    def ensure_row(self, ident, artist: str, title: str) -> tuple[int, bool]:
+        """The track this identity already is, inserting it if it is new.
+
+        Returns `(track_id, is_new)`. One place because there are now three
+        ways a track first appears: loved at a source, dropped in as a file,
+        and found in a shop's purchase history with nothing on the list to
+        match it. All three have to write the same identity columns, and a
+        row missing them is invisible to `find_existing`, which is how one
+        track becomes two.
+
+        The row starts queued whatever brought it here. What makes it owned is
+        a file arriving in the library, and that is the claim pipeline's to
+        say: a row marked purchased before the download would be a track the
+        list claims to have and the disk does not.
+        """
+        from . import identity as ident_mod
+
+        conn = self._db()
+        try:
+            with transaction(conn):
+                existing = ident_mod.find_existing(conn, ident)
+                if existing is not None:
+                    return existing, False
+                cur = conn.execute(
+                    "INSERT INTO tracks(artist, title, added_at, status,"
+                    " artist_key, title_key, qualifier_key, fp_key,"
+                    " identity_degraded, duration_ms)"
+                    " VALUES(?,?,?,'queued',?,?,?,?,?,?)",
+                    (artist, title, int(time.time()),
+                     ident.artist_key, ident.title.base,
+                     ident_mod.qualifier_key(ident), ident_mod.fingerprint(ident),
+                     int(bool(ident.identity_degraded)), ident.duration_ms),
+                )
+                return cur.lastrowid, True
+        finally:
+            conn.close()
+
     def mark_purchased(self, track_id: int, via: str, item_key: str | None = None) -> None:
         self.set_status(track_id, "purchased",
                         purchased_at=int(time.time()), purchased_via=via,

@@ -261,6 +261,130 @@ class TheOnlyVersionOfASong(Base):
         self.assertEqual([e["track_id"] for e in self.enqueued], [exact])
 
 
+class PurchasesOnNoList(Base):
+    """A recent purchase matching nothing on the list is taken in anyway.
+
+    The anchor is the newest purchase already filed at that shop. A shop lists
+    newest first, so everything above that row arrived since the last time this
+    caught up, and everything below it is old buying that was deliberately
+    never on the list.
+
+    The live account is the shape to keep in mind: three purchases nothing on
+    the want list matched, one of them newer than anything filed and two of
+    them older, with the two older ones already in the library by other means.
+    Taking all three would have been wrong.
+    """
+
+    def filed(self, artist, title, key, store="qobuz"):
+        """A track already owned, filed against a purchase at that shop."""
+        track_id = self.a_track(artist, title)
+        self.svc.tracks.mark_purchased(track_id, store, key)
+        return track_id
+
+    def test_a_purchase_newer_than_the_last_filed_one_is_taken(self):
+        self.filed("Percy Sledge", "Love Me Tender", "68907204/2")
+        shop = FakeStore("qobuz", "Qobuz", [
+            item("69004497/1", "Queens Of The Stone Age", "First It Giveth"),
+            item("68907204/2", "Percy Sledge", "Love Me Tender"),
+        ])
+        out = self.sweep([shop])
+        self.assertEqual(out["queue"]["adopted"], 1)
+        self.assertEqual([n["title"] for n in out["queue"]["new"]], ["First It Giveth"])
+
+        # It becomes an ordinary claim, like everything else this queues. The
+        # download, the verification and the audit row are the ones that exist.
+        self.assertEqual([j["kind"] for j in self.enqueued], ["claim"])
+
+    def test_a_purchase_older_than_the_last_filed_one_is_left(self):
+        self.filed("Percy Sledge", "Love Me Tender", "68907204/2")
+        shop = FakeStore("qobuz", "Qobuz", [
+            item("68907204/2", "Percy Sledge", "Love Me Tender"),
+            item("68471357/1", "CHVRCHES", "Lies"),
+            item("68261774/1", "Audioslave", "Shadow On The Sun"),
+        ])
+        out = self.sweep([shop])
+        self.assertEqual(out["queue"]["adopted"], 0)
+        self.assertEqual(self.enqueued, [])
+
+    def test_the_row_it_creates_is_the_purchase_as_the_shop_names_it(self):
+        self.filed("Percy Sledge", "Love Me Tender", "68907204/2")
+        shop = FakeStore("qobuz", "Qobuz", [
+            item("69004497/1", "Queens Of The Stone Age", "First It Giveth"),
+            item("68907204/2", "Percy Sledge", "Love Me Tender"),
+        ])
+        self.sweep([shop])
+        titles = {t["title"] for t in self.svc.tracks.queued()}
+        self.assertIn("First It Giveth", titles)
+
+    def test_a_shop_with_nothing_filed_yet_adopts_nothing(self):
+        # No filed row means no anchor, so every purchase in the account looks
+        # new. Taking a whole back catalogue is not what "since the last one"
+        # means, and it would be a lot of downloads to discover that.
+        shop = FakeStore("qobuz", "Qobuz", [
+            item("69004497/1", "Queens Of The Stone Age", "First It Giveth"),
+            item("68471357/1", "CHVRCHES", "Lies"),
+        ])
+        out = self.sweep([shop])
+        self.assertEqual(out["queue"]["adopted"], 0)
+
+    def test_a_purchase_that_matched_a_wanted_track_is_not_taken_twice(self):
+        self.filed("Percy Sledge", "Love Me Tender", "68907204/2")
+        wanted = self.a_track("Queens Of The Stone Age", "First It Giveth")
+        shop = FakeStore("qobuz", "Qobuz", [
+            item("69004497/1", "Queens Of The Stone Age", "First It Giveth"),
+            item("68907204/2", "Percy Sledge", "Love Me Tender"),
+        ])
+        out = self.sweep([shop])
+        self.assertEqual((out["queue"]["queued"], out["queue"]["adopted"]), (1, 0))
+        self.assertEqual([j["track_id"] for j in self.enqueued], [wanted])
+
+    def test_an_ignored_track_is_not_dragged_back_by_its_purchase(self):
+        # Ignoring is a decision. Downloading it anyway because the shop still
+        # has it would overrule a person with a rule.
+        self.filed("Percy Sledge", "Love Me Tender", "68907204/2")
+        ignored = self.a_track("Bastille", "Happier")
+        self.svc.tracks.set_status(ignored, "ignored")
+        from libwish import identity
+        conn = self.svc.db()
+        try:
+            identity.recompute_identity_columns(conn)
+            conn.commit()
+        finally:
+            conn.close()
+
+        shop = FakeStore("qobuz", "Qobuz", [
+            item("69004497/1", "Bastille", "Happier"),
+            item("68907204/2", "Percy Sledge", "Love Me Tender"),
+        ])
+        out = self.sweep([shop])
+        self.assertEqual(out["queue"]["adopted"], 0)
+        self.assertEqual(self.status_of(ignored), "ignored")
+
+    def test_more_than_one_sweep_will_take_is_reported_not_swallowed(self):
+        from libwish import sync
+        self.filed("Percy Sledge", "Love Me Tender", "old/1")
+        many = [item(f"new/{n}", "Artist %d" % n, "Track %d" % n)
+                for n in range(sync.ADOPT_LIMIT + 3)]
+        shop = FakeStore("qobuz", "Qobuz", many + [item("old/1", "Percy Sledge",
+                                                        "Love Me Tender")])
+        out = self.sweep([shop])
+        self.assertEqual(out["queue"]["adopted"], sync.ADOPT_LIMIT)
+        self.assertEqual(out["queue"]["over_cap"], 3)
+
+    def test_it_files_nothing_by_itself(self):
+        # The sweep queues claims and nothing else. A track is owned when a
+        # file is in the library, which is the claim pipeline's to say.
+        self.filed("Percy Sledge", "Love Me Tender", "68907204/2")
+        shop = FakeStore("qobuz", "Qobuz", [
+            item("69004497/1", "Queens Of The Stone Age", "First It Giveth"),
+            item("68907204/2", "Percy Sledge", "Love Me Tender"),
+        ])
+        self.sweep([shop])
+        new = [t for t in self.svc.tracks.queued() if t["title"] == "First It Giveth"]
+        self.assertEqual(len(new), 1)
+        self.assertEqual(new[0]["status"], "queued")
+
+
 class OneShopDown(Base):
     def test_a_signed_out_shop_does_not_sink_the_others(self):
         track_id = self.a_track("CHVRCHES", "Lies")

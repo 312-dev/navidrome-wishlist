@@ -25,6 +25,14 @@ Below the gate nothing is recorded against the track. A purchase that nearly
 matched is reported in the job's own result and left alone: marking a track
 owned on a guess removes it from the list, and the reader never learns it was a
 guess, which is the one failure here worth designing against.
+
+A purchase matching nothing on the list is a different case again, and gets its
+own row rather than being dropped. The want list is not the whole of what
+somebody buys, and a record bought on a whim would otherwise stay in the shop
+forever. `_adopt` is that, and what fences it is age: only purchases newer than
+the last one already filed at that shop, so turning this on does not drag in
+years of buying. Nothing about the matcher is relaxed to do it, because there
+is nothing to match against.
 """
 
 from __future__ import annotations
@@ -39,6 +47,13 @@ from .log import get
 from .models import MATCH_CONFIRM_MIN
 
 log = get("sync")
+
+#: How many unlisted purchases one sweep will take in. The rule below reads a
+#: shop's listing as newest first, which every shop this talks to does; a shop
+#: that ever answered oldest first would make every purchase in the account
+#: look new, and this is what stops that being a hundred downloads before
+#: anyone notices. When it bites, the sweep says so rather than going quiet.
+ADOPT_LIMIT = 25
 
 # One shop that is down must not sink the sweep: the others still have
 # purchases worth finding, and "Bandcamp is signed out" is a thing to report
@@ -75,20 +90,25 @@ class SyncPipeline:
             )
 
         progress("match", purchases=sum(len(r.items) for r in reachable))
-        queued, near = self._match(reachable)
+        queued, near, taken = self._match(reachable)
+        adopted, over_cap = self._adopt(reachable, taken)
 
         # Reported on the job rather than logged and forgotten. A sweep that
         # finished having queued nothing has to be able to say whether that is
         # because everything was already filed or because nothing matched.
         progress("queue",
                  queued=len(queued),
+                 adopted=len(adopted),
+                 over_cap=over_cap,
                  near_misses=len(near),
                  shops_read=len(reachable),
                  shops_skipped=[{"shop": r.store.name, "why": r.problem}
                                 for r in results if r.problem],
                  matched=[{"track_id": t, "shop": s, "title": ti} for t, s, ti in queued],
+                 new=[{"track_id": t, "shop": s, "title": ti} for t, s, ti in adopted],
                  near=near)
-        log.info("sweep finished", context={"queued": len(queued), "near": len(near)})
+        log.info("sweep finished", context={"queued": len(queued), "near": len(near),
+                                            "adopted": len(adopted), "over_cap": over_cap})
 
     def _enumerate(self, stores, progress) -> list[ShopResult]:
         """Read every shop's purchases, in parallel.
@@ -135,7 +155,7 @@ class SyncPipeline:
         """
         wanted = self.svc.tracks.queued()
         if not wanted:
-            return [], []
+            return [], [], set()
 
         # Every unfiled purchase, across every shop, as one candidate list.
         pool: list[tuple[Any, Any]] = []
@@ -147,7 +167,7 @@ class SyncPipeline:
                 if item.item_key not in filed:
                     pool.append((result.store, item))
         if not pool:
-            return [], []
+            return [], [], set()
 
         candidates = [identity.from_owned_item(item) for _, item in pool]
         wants = [identity.build_identity(t["artist"], t["title"]) for t in wanted]
@@ -194,7 +214,34 @@ class SyncPipeline:
 
         also_queued, also_near = self._version_variants(
             wanted, wants, candidates, pool, spent, unfiled)
-        return queued + also_queued, near + also_near
+        taken = {(pool[i][0].id, pool[i][1].item_key) for i in spent}
+        return queued + also_queued, near + also_near, taken
+
+    def _since_last_filed(self, results: list[ShopResult]) -> set[tuple[str, str]]:
+        """Purchases newer than the newest one already filed at their shop.
+
+        A shop lists purchases newest first, so the newest one already filed is
+        the first filed row the walk meets, and everything above it arrived
+        after the last time this caught up. That is the whole rule: no dates
+        are parsed and no ids are compared. Qobuz states a date but not which
+        way round it reads, and an order number being sequential is an
+        assumption about a shop's billing rather than something it promises.
+
+        A shop with nothing filed yet has no such row, so it has no anchor
+        either, and every purchase in the account looks new. Adopting a whole
+        back catalogue is not what "since the last one" means, so a shop in
+        that state is skipped and said to be skipped.
+        """
+        fresh: set[tuple[str, str]] = set()
+        for result in results:
+            filed = self.svc.tracks.owned_item_keys(result.store.id)
+            if not filed:
+                continue
+            for item in result.items:
+                if item.item_key in filed:
+                    break
+                fresh.add((result.store.id, item.item_key))
+        return fresh
 
     def _version_variants(self, wanted, wants, candidates, pool,
                           spent: set[int], unfiled: set[int]):
@@ -260,6 +307,74 @@ class SyncPipeline:
                 " differing from it only in version, nobody was asked"))
 
         return queued, near
+
+    def _adopt(self, results: list[ShopResult], taken: set[tuple[str, str]]):
+        """Bring in a recent purchase that is on no list at all.
+
+        The want list is not the whole of what someone buys. A record bought
+        on a whim, or one bought before this application ever saw the account,
+        matches nothing here and would sit in the shop forever while the point
+        of the exercise is to have it on disk.
+
+        Bounded at both ends. `_since_last_filed` is the older end: only what
+        arrived after the last purchase this caught up with, so switching this
+        on does not drag in a decade of buying. `ADOPT_LIMIT` is the other, in
+        case a shop ever lists the wrong way round.
+
+        A purchase whose identity is already a row this application has an
+        opinion about is left alone. An ignored track is a decision, and
+        quietly downloading one because the shop still has it would overrule a
+        person with a rule.
+        """
+        fresh = self._since_last_filed(results)
+        if not fresh:
+            return [], 0
+
+        adopted: list[tuple[int, str, str]] = []
+        over_cap = 0
+        for result in results:
+            for item in result.items:
+                key = (result.store.id, item.item_key)
+                if key not in fresh or key in taken:
+                    continue
+                if len(adopted) >= ADOPT_LIMIT:
+                    over_cap += 1
+                    continue
+                track = self._row_for_purchase(item)
+                if track is None:
+                    continue
+                adopted.append(self._take(
+                    track, result.store, item,
+                    "bought since the last purchase filed from this shop, and on"
+                    " no list to match against, so it was taken as it stands"))
+        if over_cap:
+            log.warning("more new purchases than one sweep will take",
+                        context={"limit": ADOPT_LIMIT, "left": over_cap})
+        return adopted, over_cap
+
+    def _row_for_purchase(self, item) -> dict | None:
+        """The track row a purchase should be filed against, or None to skip.
+
+        None where the identity already exists as something other than a want:
+        ignored means a person said no, and anything already owned is either
+        filed or being filed right now. Creating a second row for either would
+        put the same recording on the list twice, which is the failure the
+        identity ladder exists to prevent.
+        """
+        ident = identity.from_owned_item(item)
+        track_id, fresh = self.svc.tracks.ensure_row(ident, item.artist, item.title)
+        track = self.svc.tracks.get(track_id)
+        if track is None:
+            return None
+        if not fresh and track.get("status") != "queued":
+            log.info("a new purchase matches a track already decided about",
+                     context={"track": track_id, "status": track.get("status"),
+                              "item": item.item_key})
+            return None
+        if fresh:
+            self.svc.bus.publish("track.added", id=track_id, artist=item.artist,
+                                 title=item.title, source=item.store)
+        return track
 
     def _take(self, track, store, item, why: str) -> tuple[int, str, str]:
         """Record the decision, then queue the claim that acts on it.

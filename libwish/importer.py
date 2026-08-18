@@ -21,14 +21,12 @@ better answer there than any search.
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from . import artwork, enrich, identity, tags
 from .claim import rescan, verify_audio  # the same check a download passes
-from .db import transaction
 from .errors import LibwishError, VerificationFailed
 from .log import get
 from .paths import FileExists
@@ -173,25 +171,7 @@ def _row_for(svc: Any, found: tags.FileTags) -> tuple[int, bool]:
     reader has been looking at is the row that turns owned.
     """
     ident = identity.build_identity(found.artist, found.title)
-    now = int(time.time())
-    conn = svc.db()
-    try:
-        with transaction(conn):
-            track_id = identity.find_existing(conn, ident)
-            if track_id is not None:
-                return track_id, False
-            cur = conn.execute(
-                "INSERT INTO tracks(artist, title, added_at, status,"
-                " artist_key, title_key, qualifier_key, fp_key,"
-                " identity_degraded, duration_ms)"
-                " VALUES(?,?,?,'queued',?,?,?,?,?,NULL)",
-                (found.artist, found.title, now, ident.artist_key, ident.title.base,
-                 identity.qualifier_key(ident), identity.fingerprint(ident),
-                 int(bool(ident.identity_degraded))),
-            )
-            return cur.lastrowid, True
-    finally:
-        conn.close()
+    return svc.tracks.ensure_row(ident, found.artist, found.title)
 
 
 def _publish(svc: Any, staged: Path, found: tags.FileTags, fmt: str) -> tuple[Path, bool]:

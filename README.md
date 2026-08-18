@@ -34,6 +34,11 @@ rather buy simply lose track of what they meant to buy. This is the list.
   from every shop in parallel and files everything on the list it recognises,
   so buying five records in one go does not mean marking off five records one
   at a time.
+
+  It also takes in what is on no list at all, since the want list is not the
+  whole of what anyone buys. Only purchases newer than the last one already
+  filed at that shop, so switching it on does not drag in years of buying, and
+  never one you have ignored.
 - **Takes a file from a shop it cannot read.** iTunes sells you an m4a and
   keeps no history worth reading, so hand over the file instead: drop it on the
   page, or use Add files. It is identified from its own tags, filed into the

@@ -1274,10 +1274,23 @@
     if (phase !== 'queue') return 'Reading your purchases...';
 
     var queued = data.queued || 0;
+    var adopted = data.adopted || 0;
     var near = data.near_misses || 0;
     var parts = [];
-    parts.push(queued ? 'Filing ' + queued + (queued === 1 ? ' purchase.' : ' purchases.')
-                      : 'Nothing new to file.');
+    parts.push(queued || adopted
+      ? 'Filing ' + (queued + adopted) + (queued + adopted === 1 ? ' purchase.' : ' purchases.')
+      : 'Nothing new to file.');
+    /* Counted separately because it is a different claim about the reader's
+       library: these were not on the list, so the list is not what says they
+       belong there. */
+    if (adopted) {
+      parts.push(adopted === 1
+        ? '1 was not on the want list, and was bought since the last sweep.'
+        : adopted + ' were not on the want list, and were bought since the last sweep.');
+    }
+    if (data.over_cap) {
+      parts.push(data.over_cap + ' more are waiting for the next sweep.');
+    }
     if (near) parts.push(near + (near === 1 ? ' was too close to call.' : ' were too close to call.'));
     (data.shops_skipped || []).forEach(function (s) {
       parts.push(s.shop + ' was skipped: ' + s.why + '.');
